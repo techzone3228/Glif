@@ -7,6 +7,7 @@ import io
 import yt_dlp
 import os
 import tempfile
+import subprocess
 
 app = Flask(__name__)
 
@@ -118,18 +119,32 @@ def generate_thumbnail(prompt):
     return {'status': 'error'}
 
 def download_media(url):
-    """Download media from YouTube/TikTok/Twitter using yt-dlp"""
+    """Download media from YouTube/TikTok/Twitter using yt-dlp with cookies"""
     try:
         temp_dir = tempfile.mkdtemp()
+        
+        # Using the exact same yt-dlp options as your working script
         ydl_opts = {
             'format': 'best',
             'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
             'quiet': True,
+            'no_warnings': False,
+            'ignoreerrors': True,
+            'retries': 3,
+            'fragment_retries': 3,
+            'extract_flat': False,
+            'force_generic_extractor': True
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
+            if not info:
+                raise ValueError("Failed to extract video info")
+                
             filename = ydl.prepare_filename(info)
+            if not os.path.exists(filename):
+                raise FileNotFoundError("Downloaded file not found")
+                
             return filename
             
     except Exception as e:
@@ -217,8 +232,9 @@ def handle_webhook():
                     }[command]
                     send_whatsapp_file(file_path, f"🎥 {platform} Video", is_video=True)
                     os.remove(file_path)
+                    os.rmdir(os.path.dirname(file_path))  # Clean up temp directory
                 else:
-                    send_whatsapp_message("❌ Failed to download media. Please check the URL.")
+                    send_whatsapp_message("❌ Failed to download media. Please try again or check the URL.")
             else:
                 send_whatsapp_message("⚠️ Please provide a valid YouTube, TikTok, or Twitter URL")
         
