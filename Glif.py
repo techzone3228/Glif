@@ -2,191 +2,195 @@ from flask import Flask, request, jsonify
 from waitress import serve
 import requests
 import logging
-import os
-import time
+from datetime import datetime
 
 app = Flask(__name__)
-logging.basicConfig(level=logging.INFO)
+
+# ======================
+# CONFIGURATION
+# ======================
+GREEN_API = {
+    "idInstance": "7105258364",
+    "apiToken": "9f9e1a1a2611446baed68fd648dba823d34e655958e54b28bb",
+    "apiUrl": "https://7105.api.greenapi.com",
+    "mediaUrl": "https://7105.media.greenapi.com"
+}
+AUTHORIZED_NUMBER = "923401809397"  # ONLY this number can interact
+
+# GLIF Configuration
+GLIF_ID = "cm0zceq2a00023f114o6hti7w"
+GLIF_TOKENS = [
+    "glif_a4ef6d3aa5d8575ea8448b29e293919a42a6869143fcbfc32f2e4a7dbe53199a",
+    "glif_51d216db54438b777c4170cd8913d628ff0af09789ed5dbcbd718fa6c6968bb1",
+    "glif_c9dc66b31537b5a423446bbdead5dc2dbd73dc1f4a5c47a9b77328abcbc7b755",
+    "glif_f5a55ee6d767b79f2f3af01c276ec53d14475eace7cabf34b22f8e5968f3fef5",
+    "glif_c3a7fd4779b59f59c08d17d4a7db46beefa3e9e49a9ebc4921ecaca35c556ab7",
+    "glif_b31fdc2c9a7aaac0ec69d5f59bf05ccea0c5786990ef06b79a1d7db8e37ba317"
+]
+
+# ======================
+# LOGGING SETUP
+# ======================
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 logger = logging.getLogger(__name__)
 
-# GreenAPI Configuration
-INSTANCE_ID = "7105258364"
-API_TOKEN = "9f9e1a1a2611446baed68fd648dba823d34e655958e54b28bb"
-BASE_API_URL = "https://7105.api.greenapi.com"
-BASE_MEDIA_URL = "https://7105.media.greenapi.com"
-AUTHORIZED_NUMBER = "923401809397"  # Only respond to this number
-BOT_NUMBER = "923247220362"  # Your bot's number
-
-# Temporary directory for downloads
-TEMP_DIR = "temp_downloads"
-os.makedirs(TEMP_DIR, exist_ok=True)
-
-@app.route('/')
-def health_check():
-    """Endpoint for Koyeb health checks"""
-    return jsonify({"status": "ready", "service": "WhatsApp Media Bot"})
-
-@app.route('/webhook', methods=['GET', 'POST'])
-def webhook():
-    try:
-        logger.info(f"\n{'='*50}\nIncoming request: {request.method}")
-        
-        if request.method == 'GET':
-            return jsonify({"status": "active"}), 200
-
-        data = request.json
-        if not data:
-            logger.error("No data received")
-            return jsonify({'status': 'error', 'message': 'No data received'}), 400
-
-        logger.info(f"Request data: {data}")
-
-        # Process incoming messages
-        if data.get('event_type') == 'message_received':
-            message_data = data.get('data', {})
-            sender_number = message_data.get('from', '').split('@')[0]
-            message_text = message_data.get('body', '').strip()
-            
-            # Only respond to authorized number
-            if sender_number != AUTHORIZED_NUMBER:
-                logger.info(f"Ignoring message from unauthorized number: {sender_number}")
-                return jsonify({'status': 'ignored'})
-            
-            logger.info(f"Processing message from {sender_number}: {message_text}")
-            
-            # Check if message looks like a URL (simplified check)
-            if message_text.startswith(('http://', 'https://')):
-                # Download and send back the media
-                process_media_url(message_text, sender_number)
-            else:
-                send_message(sender_number, "Please send a direct download link to an image or video file.")
-            
-        return jsonify({'status': 'processed'})
+# ======================
+# CORE FUNCTIONS
+# ======================
+def send_whatsapp_message(text):
+    """Send message to authorized number only"""
+    url = f"{GREEN_API['apiUrl']}/waInstance{GREEN_API['idInstance']}/sendMessage/{GREEN_API['apiToken']}"
+    payload = {
+        "chatId": f"{AUTHORIZED_NUMBER}@c.us",
+        "message": text
+    }
+    headers = {'Content-Type': 'application/json'}
     
-    except Exception as e:
-        logger.error(f"Error processing webhook: {str(e)}", exc_info=True)
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-def process_media_url(url, recipient_number, retries=3):
-    """Download media from URL and send back to user"""
     try:
-        send_message(recipient_number, "🔍 Downloading your media file...")
-        
-        # Download the file
-        filename = os.path.join(TEMP_DIR, f"downloaded_{int(time.time())}")
-        
-        for attempt in range(retries):
-            try:
-                response = requests.get(url, stream=True, timeout=30)
-                response.raise_for_status()
-                
-                # Determine content type from headers
-                content_type = response.headers.get('content-type', '')
-                
-                # Set appropriate file extension
-                if 'image' in content_type:
-                    filename += '.jpg'  # Default to jpg for images
-                elif 'video' in content_type:
-                    filename += '.mp4'  # Default to mp4 for videos
-                else:
-                    # If content type not clear, try to guess from URL
-                    if any(url.lower().endswith(ext) for ext in ['.jpg', '.jpeg', '.png', '.gif']):
-                        filename += '.jpg'
-                    elif any(url.lower().endswith(ext) for ext in ['.mp4', '.mov', '.webm']):
-                        filename += '.mp4'
-                    else:
-                        filename += '.bin'  # Fallback extension
-                
-                with open(filename, 'wb') as f:
-                    for chunk in response.iter_content(chunk_size=8192):
-                        f.write(chunk)
-                
-                logger.info(f"Successfully downloaded file: {filename}")
-                break
-            except Exception as e:
-                if attempt == retries - 1:
-                    raise
-                time.sleep(2)
-        
-        # Determine media type and MIME type
-        if 'image' in content_type:
-            media_type = 'image'
-            mime_type = content_type or 'image/jpeg'
-        elif 'video' in content_type:
-            media_type = 'video'
-            mime_type = content_type or 'video/mp4'
-        else:
-            # Fallback based on file extension
-            if filename.lower().endswith(('.mp4', '.mov', '.webm')):
-                media_type = 'video'
-                mime_type = 'video/mp4'
-            else:
-                media_type = 'image'
-                mime_type = 'image/jpeg'
-        
-        # Send the file back
-        send_file(recipient_number, filename, media_type, mime_type)
-        
-        # Clean up
-        if os.path.exists(filename):
-            os.remove(filename)
-        
+        response = requests.post(url, json=payload, headers=headers)
+        response.raise_for_status()
+        logger.info(f"Sent message to {AUTHORIZED_NUMBER}")
+        return True
     except Exception as e:
-        logger.error(f"Error processing media URL: {str(e)}")
-        send_message(recipient_number, f"❌ Error: {str(e)}")
+        logger.error(f"Failed to send message: {str(e)}")
+        return False
 
-def send_message(recipient_number, text, retries=3):
-    """Send WhatsApp message"""
-    chat_id = f"{recipient_number}@c.us"
-    url = f"{BASE_API_URL}/waInstance{INSTANCE_ID}/sendMessage/{API_TOKEN}"
+def send_whatsapp_image(image_url, caption):
+    """Send image to authorized number only"""
+    # Step 1: Upload file
+    upload_url = f"{GREEN_API['apiUrl']}/waInstance{GREEN_API['idInstance']}/uploadFile/{GREEN_API['apiToken']}"
+    try:
+        upload_response = requests.post(upload_url, json={"url": image_url})
+        upload_response.raise_for_status()
+        file_id = upload_response.json().get("idFile")
+        if not file_id:
+            raise ValueError("No file ID received")
+    except Exception as e:
+        logger.error(f"Upload failed: {str(e)}")
+        return False
+
+    # Step 2: Send file
+    send_url = f"{GREEN_API['apiUrl']}/waInstance{GREEN_API['idInstance']}/sendFileByUpload/{GREEN_API['apiToken']}"
+    payload = {
+        "chatId": f"{AUTHORIZED_NUMBER}@c.us",
+        "caption": caption,
+        "fileId": file_id
+    }
     
-    for attempt in range(retries):
+    try:
+        response = requests.post(send_url, json=payload)
+        response.raise_for_status()
+        logger.info(f"Sent image to {AUTHORIZED_NUMBER}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to send image: {str(e)}")
+        return False
+
+def generate_thumbnail(prompt):
+    """Generate thumbnail using GLIF API"""
+    prompt = prompt[:100]  # Limit prompt length
+    for token in GLIF_TOKENS:
         try:
             response = requests.post(
-                url,
-                json={
-                    'chatId': chat_id,
-                    'message': text
-                },
-                timeout=10
+                f"https://simple-api.glif.app/{GLIF_ID}",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"prompt": prompt, "style": "youtube_trending"},
+                timeout=30
             )
-            response.raise_for_status()
-            logger.info(f"Message sent to {recipient_number}")
-            return response.json()
+            data = response.json()
+            
+            # Check all possible response formats
+            for key in ["output", "image_url", "url"]:
+                if key in data and isinstance(data[key], str) and data[key].startswith('http'):
+                    logger.info(f"Generated thumbnail using token {token[-6:]}")
+                    return {'status': 'success', 'image_url': data[key]}
         except Exception as e:
-            logger.warning(f"Failed to send message (attempt {attempt + 1}): {str(e)}")
-            if attempt == retries - 1:
-                raise
-            time.sleep(2)
+            logger.warning(f"GLIF token {token[-6:]} failed: {str(e)}")
+    return {'status': 'error'}
 
-def send_file(recipient_number, file_path, media_type, mime_type, caption="Here's your media file", retries=3):
-    """Send media file through WhatsApp"""
-    chat_id = f"{recipient_number}@c.us"
-    filename = os.path.basename(file_path)
-    url = f"{BASE_MEDIA_URL}/waInstance{INSTANCE_ID}/sendFileByUpload/{API_TOKEN}"
-    
-    for attempt in range(retries):
-        try:
-            with open(file_path, 'rb') as file:
-                files = {
-                    'file': (filename, file, mime_type)
-                }
-                payload = {
-                    'chatId': chat_id,
-                    'caption': caption,
-                    'fileName': filename
-                }
-                
-                response = requests.post(url, data=payload, files=files, timeout=30)
-                response.raise_for_status()
-                logger.info(f"{media_type.capitalize()} sent to {recipient_number}")
-                return response.json()
-        except Exception as e:
-            logger.warning(f"Failed to send {media_type} (attempt {attempt + 1}): {str(e)}")
-            if attempt == retries - 1:
-                raise
-            time.sleep(2)
+# ======================
+# WEBHOOK HANDLER
+# ======================
+@app.route('/webhook', methods=['POST'])
+def handle_webhook():
+    try:
+        data = request.json
+        logger.info(f"RAW WEBHOOK DATA:\n{data}")  # Log complete raw data
 
+        # 1. Verify this is a message from your authorized number
+        sender = data.get('senderData', {}).get('sender', '')
+        if not sender.endswith(f"{AUTHORIZED_NUMBER}@c.us"):
+            logger.warning(f"Ignoring message from: {sender}")
+            return jsonify({'status': 'ignored'}), 200
+
+        # 2. Extract message text (handle different message types)
+        message_data = data.get('messageData', {})
+        
+        # Handle text messages
+        if message_data.get('typeMessage') == 'textMessage':
+            message = message_data.get('textMessageData', {}).get('textMessage', '').strip().lower()
+        
+        # Handle extended text messages (like long messages)
+        elif message_data.get('typeMessage') == 'extendedTextMessage':
+            message = message_data.get('extendedTextMessageData', {}).get('text', '').strip().lower()
+        
+        else:
+            logger.warning(f"Unsupported message type: {message_data.get('typeMessage')}")
+            return jsonify({'status': 'unsupported_type'}), 200
+
+        if not message:
+            logger.warning("Received empty message")
+            return jsonify({'status': 'empty_message'}), 200
+
+        logger.info(f"PROCESSING MESSAGE FROM {AUTHORIZED_NUMBER}: {message}")
+
+        # 3. Process commands
+        if message in ['hi', 'hello', 'hey']:
+            send_whatsapp_message("👋 Hi! Send me a video topic to generate a thumbnail!")
+        
+        elif message in ['help', 'info']:
+            send_whatsapp_message("ℹ️ Just send me a topic (e.g. 'cooking tutorial') and I'll create a thumbnail!")
+        
+        elif len(message) > 3:
+            send_whatsapp_message("🔄 Generating your thumbnail... (20-30 seconds)")
+            result = generate_thumbnail(message)
+            if result['status'] == 'success':
+                send_whatsapp_image(result['image_url'], f"🎨 Thumbnail for: {message}")
+                send_whatsapp_message(f"🔗 Direct URL: {result['image_url']}")
+            else:
+                send_whatsapp_message("❌ Failed to generate. Please try different keywords.")
+
+        return jsonify({'status': 'processed'})
+
+    except Exception as e:
+        logger.error(f"WEBHOOK ERROR: {str(e)}", exc_info=True)
+        return jsonify({'status': 'error'}), 500
+
+# ======================
+# HEALTH CHECK
+# ======================
+@app.route('/')
+def health_check():
+    return jsonify({
+        "status": "active",
+        "authorized_number": AUTHORIZED_NUMBER,
+        "instance_id": GREEN_API['idInstance'],
+        "timestamp": datetime.now().isoformat()
+    })
+
+# ======================
+# START SERVER
+# ======================
 if __name__ == '__main__':
-    logger.info("Starting WhatsApp Media Bot...")
+    logger.info(f"""
+    ============================================
+    WhatsApp Thumbnail Bot READY
+    ONLY responding to: {AUTHORIZED_NUMBER}
+    GreenAPI Instance: {GREEN_API['idInstance']}
+    ============================================
+    """)
     serve(app, host='0.0.0.0', port=8000)
