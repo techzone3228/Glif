@@ -3,16 +3,22 @@ from waitress import serve
 import requests
 import logging
 import time
+from datetime import datetime
 
 app = Flask(__name__)
-logging.basicConfig(level=logging.INFO)
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 logger = logging.getLogger(__name__)
 
 # GreenAPI Configuration
 ID_INSTANCE = "7105242995"
 API_TOKEN = "d8822c5bc02d4b00b72455cc64abd11ad672072fbe5d4bf9a2"
 API_URL = "https://7105.api.greenapi.com"
-MEDIA_URL = "https://7105.media.greenapi.com"
 AUTHORIZED_NUMBER = "923401809397"
 
 # GLIF Configuration
@@ -28,121 +34,163 @@ API_TOKENS = [
 
 @app.route('/')
 def health_check():
-    """Endpoint for health checks"""
-    return jsonify({"status": "ready"})
+    logger.info("Health check endpoint hit")
+    return jsonify({"status": "ready", "timestamp": str(datetime.now())})
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     try:
-        logger.info(f"\n{'='*50}\nIncoming request")
+        logger.info(f"\n{'='*50}\nIncoming webhook request at {datetime.now()}")
         
-        data = request.json
-        if not data:
-            logger.error("No data received")
-            return jsonify({'status': 'error', 'message': 'No data received'}), 400
+        # Log raw request data
+        raw_data = request.json
+        logger.info(f"Raw request data: {raw_data}")
+        
+        if not raw_data:
+            logger.error("Empty request received")
+            return jsonify({'status': 'error', 'message': 'No data received', 'timestamp': str(datetime.now())}), 400
 
-        logger.info(f"Request data: {data}")
+        # Extract message details with error handling
+        sender_data = raw_data.get('senderData', {})
+        message_data = raw_data.get('messageData', {})
+        
+        phone = sender_data.get('sender', '').split('@')[0]
+        message = message_data.get('extendedTextMessageData', {}).get('text', '').strip().lower()
+        
+        logger.info(f"Extracted data - Phone: {phone}, Message: {message}")
 
-        # Process messages
-        message_data = data.get('messageData', {}).get('extendedTextMessageData', {})
-        phone = data.get('senderData', {}).get('sender', '').split('@')[0]
-        message = message_data.get('text', '').strip().lower()
-
-        # Check if message is from authorized number
+        # Verify sender
         if phone != AUTHORIZED_NUMBER:
-            logger.info(f"Ignoring message from unauthorized number: {phone}")
-            return jsonify({'status': 'ignored'})
+            logger.warning(f"Unauthorized access attempt from: {phone}")
+            return jsonify({'status': 'unauthorized', 'timestamp': str(datetime.now())}), 403
 
-        logger.info(f"Processing message from {phone}: {message}")
+        logger.info(f"Processing message from authorized number: {phone}")
 
         # Command handling
         if message in ['hi', 'hello', 'hey']:
+            logger.info("Greeting command detected")
             send_message(phone, "👋 Hi! Send me any video topic to generate a thumbnail!")
             return jsonify({'status': 'success'})
             
         elif message in ['help', 'info']:
+            logger.info("Help command detected")
             send_message(phone, "ℹ️ Just send me a video topic (e.g. 'cooking tutorial') and I'll create a thumbnail!")
             return jsonify({'status': 'success'})
             
         # Thumbnail generation
         elif len(message) > 3:
+            logger.info(f"Thumbnail generation requested for: '{message}'")
             send_message(phone, "🔄 Generating your thumbnail... (20-30 seconds)")
             
-            for token in API_TOKENS:
+            for idx, token in enumerate(API_TOKENS, 1):
+                logger.info(f"Attempting GLIF API with token {idx}/{len(API_TOKENS)}")
                 result = generate_thumbnail(message, token)
+                
                 if result.get('status') == 'success':
+                    logger.info(f"Thumbnail generated successfully: {result['image_url']}")
                     send_image(phone, result['image_url'], f"🎨 Thumbnail for: {message}")
                     send_message(phone, f"🔗 Direct URL: {result['image_url']}")
                     return jsonify({'status': 'success'})
+                else:
+                    logger.warning(f"GLIF API attempt {idx} failed")
             
+            logger.error("All GLIF API attempts failed")
             send_message(phone, "❌ Failed to generate. Please try different keywords.")
 
-        return jsonify({'status': 'ignored'})
+        return jsonify({'status': 'ignored', 'reason': 'No matching command', 'timestamp': str(datetime.now())})
     
     except Exception as e:
-        logger.error(f"CRITICAL ERROR: {str(e)}", exc_info=True)
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        logger.critical(f"Unhandled exception: {str(e)}", exc_info=True)
+        return jsonify({
+            'status': 'error',
+            'message': str(e),
+            'timestamp': str(datetime.now())
+        }), 500
 
 def send_message(phone, text, retries=3):
-    """Send WhatsApp message with retry logic"""
-    for attempt in range(retries):
+    """Send WhatsApp message with detailed logging"""
+    for attempt in range(1, retries + 1):
         try:
+            logger.info(f"Attempt {attempt} to send message to {phone}")
             url = f"{API_URL}/waInstance{ID_INSTANCE}/SendMessage/{API_TOKEN}"
             payload = {
                 "chatId": f"{phone}@c.us",
                 "message": text
             }
+            
+            logger.debug(f"Request payload: {payload}")
             response = requests.post(url, json=payload, timeout=10)
             response.raise_for_status()
-            logger.info(f"Message sent to {phone} (attempt {attempt+1})")
+            
+            logger.info(f"Message sent successfully to {phone}")
+            logger.debug(f"API response: {response.text}")
             return response.json()
-        except Exception as e:
-            logger.warning(f"Message send failed (attempt {attempt+1}): {str(e)}")
-            time.sleep(2)
-    logger.error(f"Failed to send message to {phone} after {retries} attempts")
+            
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Attempt {attempt} failed: {str(e)}")
+            if attempt < retries:
+                time.sleep(2)
+    
+    logger.error(f"All {retries} attempts failed for {phone}")
     return None
 
 def send_image(phone, url, caption, retries=3):
-    """Send WhatsApp image with retry logic"""
-    for attempt in range(retries):
+    """Send WhatsApp image with detailed logging"""
+    for attempt in range(1, retries + 1):
         try:
-            # First upload the file by URL
+            logger.info(f"Attempt {attempt} to send image to {phone}")
+            
+            # Upload file
             upload_url = f"{API_URL}/waInstance{ID_INSTANCE}/UploadFile/{API_TOKEN}"
+            logger.debug(f"Uploading file from URL: {url}")
             upload_response = requests.post(upload_url, json={"url": url})
             upload_response.raise_for_status()
             file_id = upload_response.json().get('idFile')
             
             if not file_id:
-                raise ValueError("Failed to get file ID from upload")
+                raise ValueError("No file ID in upload response")
             
-            # Then send the file
+            logger.info(f"File uploaded successfully. ID: {file_id}")
+            
+            # Send file
             send_url = f"{API_URL}/waInstance{ID_INSTANCE}/SendFileByUpload/{API_TOKEN}"
             payload = {
                 "chatId": f"{phone}@c.us",
                 "caption": caption,
                 "fileId": file_id
             }
+            
+            logger.debug(f"Sending file with payload: {payload}")
             response = requests.post(send_url, json=payload, timeout=20)
             response.raise_for_status()
-            logger.info(f"Image sent to {phone} (attempt {attempt+1})")
+            
+            logger.info(f"Image sent successfully to {phone}")
+            logger.debug(f"API response: {response.text}")
             return response.json()
+            
         except Exception as e:
-            logger.warning(f"Image send failed (attempt {attempt+1}): {str(e)}")
-            time.sleep(2)
-    logger.error(f"Failed to send image to {phone} after {retries} attempts")
+            logger.error(f"Attempt {attempt} failed: {str(e)}")
+            if attempt < retries:
+                time.sleep(2)
+    
+    logger.error(f"All {retries} attempts failed for image send")
     return None
 
 def generate_thumbnail(prompt, token, max_length=100):
-    """Generate thumbnail using GLIF API"""
+    """Generate thumbnail with detailed logging"""
     try:
         logger.info(f"Generating thumbnail for: {prompt[:max_length]}")
+        
         response = requests.post(
             f"https://simple-api.glif.app/{GLIF_ID}",
             headers={"Authorization": f"Bearer {token}"},
             json={"prompt": prompt[:max_length], "style": "youtube_trending"},
             timeout=30
         )
+        response.raise_for_status()
         data = response.json()
+        
+        logger.debug(f"GLIF API raw response: {data}")
         
         # Check all possible response formats
         for key in ["output", "image_url", "url"]:
@@ -150,7 +198,7 @@ def generate_thumbnail(prompt, token, max_length=100):
                 logger.info(f"Successfully generated image: {data[key]}")
                 return {'status': 'success', 'image_url': data[key]}
         
-        logger.warning(f"Unexpected GLIF response: {data}")
+        logger.warning(f"No valid image URL found in response. Keys: {list(data.keys())}")
         return {'status': 'error'}
         
     except Exception as e:
@@ -158,5 +206,5 @@ def generate_thumbnail(prompt, token, max_length=100):
         return {'status': 'error'}
 
 if __name__ == '__main__':
-    logger.info("Starting WhatsApp Thumbnail Generator...")
+    logger.info("Starting WhatsApp Thumbnail Generator with enhanced logging...")
     serve(app, host='0.0.0.0', port=8000)
