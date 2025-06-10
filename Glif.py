@@ -3,6 +3,7 @@ from waitress import serve
 import requests
 import logging
 from datetime import datetime
+import io
 
 app = Flask(__name__)
 
@@ -15,7 +16,7 @@ GREEN_API = {
     "apiUrl": "https://7105.api.greenapi.com",
     "mediaUrl": "https://7105.media.greenapi.com"
 }
-AUTHORIZED_NUMBER = "923401809397"  # ONLY this number can interact
+AUTHORIZED_NUMBER = "923401809397"
 
 # GLIF Configuration
 GLIF_ID = "cm0zceq2a00023f114o6hti7w"
@@ -42,7 +43,7 @@ logger = logging.getLogger(__name__)
 # CORE FUNCTIONS
 # ======================
 def send_whatsapp_message(text):
-    """Send message to authorized number only"""
+    """Send text message to authorized number"""
     url = f"{GREEN_API['apiUrl']}/waInstance{GREEN_API['idInstance']}/sendMessage/{GREEN_API['apiToken']}"
     payload = {
         "chatId": f"{AUTHORIZED_NUMBER}@c.us",
@@ -53,41 +54,39 @@ def send_whatsapp_message(text):
     try:
         response = requests.post(url, json=payload, headers=headers)
         response.raise_for_status()
-        logger.info(f"Sent message to {AUTHORIZED_NUMBER}")
+        logger.info(f"Message sent: {text[:50]}...")
         return True
     except Exception as e:
         logger.error(f"Failed to send message: {str(e)}")
         return False
 
 def send_whatsapp_image(image_url, caption):
-    """Send image to authorized number only"""
-    # Step 1: Upload file
-    upload_url = f"{GREEN_API['apiUrl']}/waInstance{GREEN_API['idInstance']}/uploadFile/{GREEN_API['apiToken']}"
+    """Send image with caption using direct file upload"""
     try:
-        upload_response = requests.post(upload_url, json={"url": image_url})
-        upload_response.raise_for_status()
-        file_id = upload_response.json().get("idFile")
-        if not file_id:
-            raise ValueError("No file ID received")
-    except Exception as e:
-        logger.error(f"Upload failed: {str(e)}")
-        return False
-
-    # Step 2: Send file
-    send_url = f"{GREEN_API['apiUrl']}/waInstance{GREEN_API['idInstance']}/sendFileByUpload/{GREEN_API['apiToken']}"
-    payload = {
-        "chatId": f"{AUTHORIZED_NUMBER}@c.us",
-        "caption": caption,
-        "fileId": file_id
-    }
-    
-    try:
-        response = requests.post(send_url, json=payload)
+        # First download the image
+        response = requests.get(image_url, timeout=30)
         response.raise_for_status()
-        logger.info(f"Sent image to {AUTHORIZED_NUMBER}")
+        image_data = io.BytesIO(response.content)
+        filename = image_url.split('/')[-1].split('?')[0] or 'thumbnail.jpg'
+        
+        # Prepare multipart form data
+        url = f"{GREEN_API['mediaUrl']}/waInstance{GREEN_API['idInstance']}/sendFileByUpload/{GREEN_API['apiToken']}"
+        files = {
+            'file': (filename, image_data, 'image/jpeg')
+        }
+        data = {
+            'chatId': f"{AUTHORIZED_NUMBER}@c.us",
+            'caption': caption
+        }
+        
+        # Send request
+        upload_response = requests.post(url, files=files, data=data)
+        upload_response.raise_for_status()
+        logger.info(f"Image sent with caption: {caption[:50]}...")
         return True
+        
     except Exception as e:
-        logger.error(f"Failed to send image: {str(e)}")
+        logger.error(f"Image upload failed: {str(e)}")
         return False
 
 def generate_thumbnail(prompt):
@@ -119,25 +118,20 @@ def generate_thumbnail(prompt):
 def handle_webhook():
     try:
         data = request.json
-        logger.info(f"RAW WEBHOOK DATA:\n{data}")  # Log complete raw data
+        logger.info(f"RAW WEBHOOK DATA:\n{data}")
 
-        # 1. Verify this is a message from your authorized number
+        # Verify sender
         sender = data.get('senderData', {}).get('sender', '')
         if not sender.endswith(f"{AUTHORIZED_NUMBER}@c.us"):
             logger.warning(f"Ignoring message from: {sender}")
             return jsonify({'status': 'ignored'}), 200
 
-        # 2. Extract message text (handle different message types)
+        # Extract message text
         message_data = data.get('messageData', {})
-        
-        # Handle text messages
         if message_data.get('typeMessage') == 'textMessage':
             message = message_data.get('textMessageData', {}).get('textMessage', '').strip().lower()
-        
-        # Handle extended text messages (like long messages)
         elif message_data.get('typeMessage') == 'extendedTextMessage':
             message = message_data.get('extendedTextMessageData', {}).get('text', '').strip().lower()
-        
         else:
             logger.warning(f"Unsupported message type: {message_data.get('typeMessage')}")
             return jsonify({'status': 'unsupported_type'}), 200
@@ -148,7 +142,7 @@ def handle_webhook():
 
         logger.info(f"PROCESSING MESSAGE FROM {AUTHORIZED_NUMBER}: {message}")
 
-        # 3. Process commands
+        # Command handling
         if message in ['hi', 'hello', 'hey']:
             send_whatsapp_message("👋 Hi! Send me a video topic to generate a thumbnail!")
         
