@@ -4,6 +4,9 @@ import requests
 import logging
 from datetime import datetime
 import io
+import yt_dlp
+import os
+import tempfile
 
 app = Flask(__name__)
 
@@ -27,6 +30,15 @@ GLIF_TOKENS = [
     "glif_f5a55ee6d767b79f2f3af01c276ec53d14475eace7cabf34b22f8e5968f3fef5",
     "glif_c3a7fd4779b59f59c08d17d4a7db46beefa3e9e49a9ebc4921ecaca35c556ab7",
     "glif_b31fdc2c9a7aaac0ec69d5f59bf05ccea0c5786990ef06b79a1d7db8e37ba317"
+]
+
+# Supported domains for downloader
+SUPPORTED_DOMAINS = [
+    "youtube.com",
+    "youtu.be",
+    "tiktok.com",
+    "twitter.com",
+    "x.com"
 ]
 
 # ======================
@@ -60,33 +72,27 @@ def send_whatsapp_message(text):
         logger.error(f"Failed to send message: {str(e)}")
         return False
 
-def send_whatsapp_image(image_url, caption):
-    """Send image with caption using direct file upload"""
+def send_whatsapp_file(file_path, caption, is_video=False):
+    """Send file (video or image) with caption"""
     try:
-        # First download the image
-        response = requests.get(image_url, timeout=30)
-        response.raise_for_status()
-        image_data = io.BytesIO(response.content)
-        filename = image_url.split('/')[-1].split('?')[0] or 'thumbnail.jpg'
-        
-        # Prepare multipart form data
         url = f"{GREEN_API['mediaUrl']}/waInstance{GREEN_API['idInstance']}/sendFileByUpload/{GREEN_API['apiToken']}"
-        files = {
-            'file': (filename, image_data, 'image/jpeg')
-        }
-        data = {
-            'chatId': f"{AUTHORIZED_NUMBER}@c.us",
-            'caption': caption
-        }
         
-        # Send request
-        upload_response = requests.post(url, files=files, data=data)
-        upload_response.raise_for_status()
-        logger.info(f"Image sent with caption: {caption[:50]}...")
-        return True
-        
+        with open(file_path, 'rb') as file:
+            files = {
+                'file': (os.path.basename(file_path), file, 'video/mp4' if is_video else 'image/jpeg')
+            }
+            data = {
+                'chatId': f"{AUTHORIZED_NUMBER}@c.us",
+                'caption': caption
+            }
+            
+            response = requests.post(url, files=files, data=data)
+            response.raise_for_status()
+            logger.info(f"File sent with caption: {caption[:50]}...")
+            return True
+            
     except Exception as e:
-        logger.error(f"Image upload failed: {str(e)}")
+        logger.error(f"File upload failed: {str(e)}")
         return False
 
 def generate_thumbnail(prompt):
@@ -111,6 +117,25 @@ def generate_thumbnail(prompt):
             logger.warning(f"GLIF token {token[-6:]} failed: {str(e)}")
     return {'status': 'error'}
 
+def download_media(url):
+    """Download media from YouTube/TikTok/Twitter using yt-dlp"""
+    try:
+        temp_dir = tempfile.mkdtemp()
+        ydl_opts = {
+            'format': 'best',
+            'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
+            'quiet': True,
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+            filename = ydl.prepare_filename(info)
+            return filename
+            
+    except Exception as e:
+        logger.error(f"Media download failed: {str(e)}")
+        return None
+
 # ======================
 # WEBHOOK HANDLER
 # ======================
@@ -129,9 +154,9 @@ def handle_webhook():
         # Extract message text
         message_data = data.get('messageData', {})
         if message_data.get('typeMessage') == 'textMessage':
-            message = message_data.get('textMessageData', {}).get('textMessage', '').strip().lower()
+            message = message_data.get('textMessageData', {}).get('textMessage', '').strip()
         elif message_data.get('typeMessage') == 'extendedTextMessage':
-            message = message_data.get('extendedTextMessageData', {}).get('text', '').strip().lower()
+            message = message_data.get('extendedTextMessageData', {}).get('text', '').strip()
         else:
             logger.warning(f"Unsupported message type: {message_data.get('typeMessage')}")
             return jsonify({'status': 'unsupported_type'}), 200
@@ -143,18 +168,71 @@ def handle_webhook():
         logger.info(f"PROCESSING MESSAGE FROM {AUTHORIZED_NUMBER}: {message}")
 
         # Command handling
-        if message in ['hi', 'hello', 'hey']:
-            send_whatsapp_message("👋 Hi! Send me a video topic to generate a thumbnail!")
+        if message.lower() in ['hi', 'hello', 'hey']:
+            help_text = """👋 Hi! Here's what I can do:
+/yt [YouTube URL] - Download YouTube video
+/tt [TikTok URL] - Download TikTok video
+/tw [Twitter URL] - Download Twitter video
+/thumbnail [prompt] - Generate custom thumbnail
+/help - Show this message"""
+            send_whatsapp_message(help_text)
         
-        elif message in ['help', 'info']:
-            send_whatsapp_message("ℹ️ Just send me a topic (e.g. 'cooking tutorial') and I'll create a thumbnail!")
+        elif message.lower().startswith(('/help', 'help', 'info')):
+            help_text = """ℹ️ Available Commands:
+/yt [URL] - Download YouTube video
+/tt [URL] - Download TikTok video
+/tw [URL] - Download Twitter video
+/thumbnail [prompt] - Generate thumbnail
+/help - Show this message"""
+            send_whatsapp_message(help_text)
         
-        elif len(message) > 3:
+        elif message.lower().startswith('/thumbnail '):
+            prompt = message[11:].strip()
+            if prompt:
+                send_whatsapp_message("🔄 Generating your thumbnail... (20-30 seconds)")
+                result = generate_thumbnail(prompt)
+                if result['status'] == 'success':
+                    # Download the image first
+                    response = requests.get(result['image_url'])
+                    temp_file = os.path.join(tempfile.gettempdir(), "thumbnail.jpg")
+                    with open(temp_file, 'wb') as f:
+                        f.write(response.content)
+                    # Send as file with caption
+                    send_whatsapp_file(temp_file, f"🎨 Thumbnail for: {prompt}")
+                    send_whatsapp_message(f"🔗 Direct URL: {result['image_url']}")
+                    os.remove(temp_file)
+                else:
+                    send_whatsapp_message("❌ Failed to generate. Please try different keywords.")
+        
+        elif any(message.lower().startswith(cmd) for cmd in ['/yt ', '/tt ', '/tw ']):
+            command, url = message.split(' ', 1)
+            if any(domain in url for domain in SUPPORTED_DOMAINS):
+                send_whatsapp_message("⬇️ Downloading media... (this may take a while)")
+                file_path = download_media(url)
+                if file_path:
+                    platform = {
+                        '/yt': 'YouTube',
+                        '/tt': 'TikTok',
+                        '/tw': 'Twitter'
+                    }[command]
+                    send_whatsapp_file(file_path, f"🎥 {platform} Video", is_video=True)
+                    os.remove(file_path)
+                else:
+                    send_whatsapp_message("❌ Failed to download media. Please check the URL.")
+            else:
+                send_whatsapp_message("⚠️ Please provide a valid YouTube, TikTok, or Twitter URL")
+        
+        elif len(message) > 3:  # Fallback to thumbnail generation
             send_whatsapp_message("🔄 Generating your thumbnail... (20-30 seconds)")
             result = generate_thumbnail(message)
             if result['status'] == 'success':
-                send_whatsapp_image(result['image_url'], f"🎨 Thumbnail for: {message}")
+                response = requests.get(result['image_url'])
+                temp_file = os.path.join(tempfile.gettempdir(), "thumbnail.jpg")
+                with open(temp_file, 'wb') as f:
+                    f.write(response.content)
+                send_whatsapp_file(temp_file, f"🎨 Thumbnail for: {message}")
                 send_whatsapp_message(f"🔗 Direct URL: {result['image_url']}")
+                os.remove(temp_file)
             else:
                 send_whatsapp_message("❌ Failed to generate. Please try different keywords.")
 
@@ -182,7 +260,7 @@ def health_check():
 if __name__ == '__main__':
     logger.info(f"""
     ============================================
-    WhatsApp Thumbnail Bot READY
+    WhatsApp Media Bot READY
     ONLY responding to: {AUTHORIZED_NUMBER}
     GreenAPI Instance: {GREEN_API['idInstance']}
     ============================================
