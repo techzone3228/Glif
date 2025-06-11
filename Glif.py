@@ -6,6 +6,7 @@ from datetime import datetime
 import yt_dlp
 import os
 import tempfile
+import re
 
 app = Flask(__name__)
 
@@ -20,7 +21,7 @@ GREEN_API = {
 }
 AUTHORIZED_NUMBER = "923401809397"
 COOKIES_FILE = "cookies.txt"
-USER_STATES = {}  # To track user selection state
+USER_STATES = {}  # Stores user session data
 
 # GLIF Configuration
 GLIF_ID = "cm0zceq2a00023f114o6hti7w"
@@ -109,53 +110,94 @@ def generate_thumbnail(prompt):
     return {'status': 'error'}
 
 def get_video_formats(url):
-    """Get available video formats"""
+    """Get all available video formats with proper quality detection"""
     ydl_opts = {
         'quiet': True,
         'cookiefile': COOKIES_FILE,
         'extract_flat': False,
+        'no_warnings': False,
+        'ignoreerrors': True,
+        'force_generic_extractor': True
     }
     
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=False)
-        formats = []
-        
-        for f in info.get('formats', []):
-            if f.get('vcodec') != 'none' and f.get('acodec') != 'none':  # Video+audio
-                resolution = f.get('height', 0)
-                fps = f.get('fps', 0)
-                ext = f.get('ext', 'mp4')
-                filesize = f.get('filesize_approx', f.get('filesize', 0))
-                
-                if filesize:
-                    size_mb = round(filesize / (1024 * 1024), 1)
-                    size_str = f"{size_mb}MB"
-                else:
-                    size_str = "Unknown size"
-                
-                format_id = f.get('format_id')
-                format_note = f.get('format_note', '')
-                
-                if resolution:
-                    if fps and fps > 30:
-                        quality = f"{resolution}p{fps}"
-                    else:
-                        quality = f"{resolution}p"
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            formats = []
+            
+            # Get all formats with both video and audio
+            for f in info.get('formats', []):
+                if f.get('vcodec') != 'none' and f.get('acodec') != 'none':
+                    resolution = f.get('height')
+                    fps = f.get('fps', 0)
+                    ext = f.get('ext', 'mp4')
+                    filesize = f.get('filesize_approx', f.get('filesize', 0))
                     
-                    if format_note:
-                        quality = f"{quality} ({format_note})"
+                    # Calculate size in MB if available
+                    size_str = f"{round(filesize/(1024*1024), 1)}MB" if filesize else "Unknown"
+                    
+                    # Format quality description
+                    quality_parts = []
+                    if resolution:
+                        quality_parts.append(f"{resolution}p")
+                    if fps and fps > 30:
+                        quality_parts.append(f"{int(fps)}fps")
+                    if f.get('tbr'):
+                        quality_parts.append(f"{int(f.get('tbr'))}kbps")
+                    
+                    format_note = f.get('format_note', '')
+                    if format_note and format_note not in quality_parts:
+                        quality_parts.append(format_note)
+                    
+                    quality = ' '.join(quality_parts) if quality_parts else 'Unknown'
                     
                     formats.append({
-                        'id': format_id,
+                        'id': f['format_id'],
                         'quality': quality,
                         'ext': ext,
                         'size': size_str,
+                        'height': resolution or 0,
                         'fps': fps
                     })
-        
-        # Sort by resolution then fps
-        formats.sort(key=lambda x: (-x.get('height', 0), -x.get('fps', 0)))
-        return formats[:10]  # Return top 10 formats
+            
+            # Also check for adaptive formats that can be merged
+            adaptive_formats = []
+            for f in info.get('formats', []):
+                if f.get('vcodec') != 'none' and f.get('acodec') == 'none':
+                    adaptive_formats.append(f)
+            
+            # Sort formats by resolution then fps
+            formats.sort(key=lambda x: (-x['height'], -x['fps']))
+            
+            # Add combined format options
+            if adaptive_formats:
+                video_formats = [f for f in adaptive_formats if f.get('vcodec') != 'none']
+                audio_formats = [f for f in info.get('formats', []) if f.get('acodec') != 'none' and f.get('vcodec') == 'none']
+                
+                video_formats.sort(key=lambda x: (-x.get('height', 0), -x.get('fps', 0)))
+                audio_formats.sort(key=lambda x: -x.get('tbr', 0))
+                
+                # Add top 3 video+audio combinations
+                for v in video_formats[:3]:
+                    if audio_formats:
+                        combined_id = f"{v['format_id']}+{audio_formats[0]['format_id']}"
+                        height = v.get('height', 0)
+                        fps = v.get('fps', 0)
+                        quality = f"{height}p{fps if fps > 30 else ''} (combined)".strip()
+                        formats.insert(0, {
+                            'id': combined_id,
+                            'quality': quality,
+                            'ext': 'mp4',
+                            'size': 'Unknown',
+                            'height': height,
+                            'fps': fps
+                        })
+            
+            return formats[:10]  # Return top 10 formats
+    
+    except Exception as e:
+        logger.error(f"Error getting formats: {str(e)}")
+        return None
 
 def download_video(url, format_id):
     """Download video in selected format"""
@@ -171,6 +213,11 @@ def download_video(url, format_id):
             'fragment_retries': 10,
             'socket_timeout': 30,
             'noplaylist': True,
+            'merge_output_format': 'mp4',
+            'postprocessors': [{
+                'key': 'FFmpegVideoConvertor',
+                'preferedformat': 'mp4'
+            }]
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -186,12 +233,19 @@ def download_video(url, format_id):
         logger.error(f"Video download failed: {str(e)}")
         return None
     finally:
-        # Clean up temp directory if empty
         try:
             if os.path.exists(temp_dir) and not os.listdir(temp_dir):
                 os.rmdir(temp_dir)
         except:
             pass
+
+def is_youtube_url(url):
+    """Check if URL is a valid YouTube URL"""
+    youtube_regex = (
+        r'(https?://)?(www\.)?'
+        '(youtube|youtu|youtube-nocookie)\.(com|be)/'
+        '(watch\?v=|embed/|v/|.+\?v=)?([^&=%\?]{11})')
+    return re.match(youtube_regex, url) is not None
 
 # ======================
 # WEBHOOK HANDLER
@@ -252,7 +306,7 @@ def handle_webhook():
         # Command handling
         if message.lower() in ['hi', 'hello', 'hey']:
             help_text = """👋 Hi! Here's what I can do:
-/yt [YouTube URL] - Download YouTube video
+/yt [YouTube URL] - Download YouTube video with quality selection
 /thumbnail [prompt] - Generate custom thumbnail
 /help - Show this message"""
             send_whatsapp_message(help_text)
@@ -282,7 +336,7 @@ def handle_webhook():
         
         elif message.lower().startswith('/yt '):
             url = message[4:].strip()
-            if 'youtube.com' in url or 'youtu.be' in url:
+            if is_youtube_url(url):
                 send_whatsapp_message("🔍 Checking available video qualities...")
                 formats = get_video_formats(url)
                 
@@ -304,9 +358,9 @@ def handle_webhook():
                         "Reply with the number of your preferred quality:"
                     )
                 else:
-                    send_whatsapp_message("❌ Could not retrieve video formats. The video may be restricted.")
+                    send_whatsapp_message("❌ Could not retrieve video formats. The video may be restricted or unavailable.")
             else:
-                send_whatsapp_message("⚠️ Please provide a valid YouTube URL")
+                send_whatsapp_message("⚠️ Please provide a valid YouTube URL starting with /yt")
         
         elif len(message) > 3:  # Fallback to thumbnail generation
             send_whatsapp_message("🔄 Generating your thumbnail... (20-30 seconds)")
