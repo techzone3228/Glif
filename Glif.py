@@ -6,8 +6,6 @@ from datetime import datetime
 import yt_dlp
 import os
 import tempfile
-import subprocess
-import asyncio
 
 app = Flask(__name__)
 
@@ -22,7 +20,6 @@ GREEN_API = {
 }
 AUTHORIZED_NUMBER = "923401809397"
 COOKIES_FILE = "cookies.txt"  # Path to your cookies file
-TELEGRAM_MAX_SIZE_MB = 50  # Max file size for WhatsApp (50MB)
 
 # GLIF Configuration
 GLIF_ID = "cm0zceq2a00023f114o6hti7w"
@@ -120,76 +117,38 @@ def generate_thumbnail(prompt):
             logger.warning(f"GLIF token {token[-6:]} failed: {str(e)}")
     return {'status': 'error'}
 
-def reduce_quality_ffmpeg(video_path, output_path, target_size_mb=50):
-    """Reduce video quality using ffmpeg to fit within WhatsApp size limits"""
-    try:
-        # Command to reduce video quality using ffmpeg
-        command = [
-            'ffmpeg', '-i', video_path,
-            '-b:v', '500k',  # Adjust the video bitrate
-            '-vf', 'scale=iw/2:ih/2',  # Reduce resolution by half
-            '-c:a', 'aac',  # Encode audio with AAC
-            '-b:a', '128k',  # Adjust the audio bitrate
-            output_path
-        ]
-
-        # Execute the ffmpeg command
-        subprocess.run(command, check=True)
-        return True
-    except subprocess.CalledProcessError as e:
-        logger.error(f"Error reducing video quality with ffmpeg: {str(e)}")
-        return False
-
-async def download_media(url, format="video"):
-    """Download media from supported platforms with progress tracking"""
+def download_media(url):
+    """Download media using the exact working method from Telegram bot"""
     try:
         temp_dir = tempfile.mkdtemp()
         
-        # Determine the format
-        if format == "audio":
-            format_type = 'bestaudio/best'
-            ext = 'mp3'
-        else:
-            format_type = 'best'
-            ext = 'mp4'
-
-        # yt-dlp configuration
         ydl_opts = {
-            'outtmpl': os.path.join(temp_dir, '%(id)s.%(ext)s'),
-            'format': format_type,
-            'restrictfilenames': True,
+            'format': 'best',
+            'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
             'quiet': True,
             'cookiefile': COOKIES_FILE,
-            'extractor_args': {
-                'youtube': {
-                    'skip': ['dash', 'hls']
-                }
-            },
+            'extract_flat': False,
             'retries': 10,
             'fragment_retries': 10,
             'ignoreerrors': True,
             'no_warnings': False,
-            'socket_timeout': 30
+            'socket_timeout': 30,
+            'extractor_args': {
+                'youtube': {
+                    'skip': ['dash', 'hls']
+                }
+            }
         }
         
-        # Download the video
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             if not info:
                 raise ValueError("Failed to extract video info")
-            
+                
             filename = ydl.prepare_filename(info)
             if not os.path.exists(filename):
                 raise FileNotFoundError("Downloaded file not found")
-            
-            # Check file size and reduce quality if needed
-            file_size_mb = os.path.getsize(filename) / (1024 * 1024)
-            if file_size_mb > TELEGRAM_MAX_SIZE_MB:
-                compressed_filename = os.path.join(temp_dir, f"compressed_{os.path.basename(filename)}")
-                if reduce_quality_ffmpeg(filename, compressed_filename, TELEGRAM_MAX_SIZE_MB):
-                    os.remove(filename)  # Remove original file
-                    filename = compressed_filename
-            
+                
             return filename
             
     except Exception as e:
@@ -275,15 +234,7 @@ def handle_webhook():
             command, url = message.split(' ', 1)
             if any(domain in url for domain in SUPPORTED_DOMAINS):
                 send_whatsapp_message("⬇️ Downloading media... (this may take a while)")
-                
-                # Run async download in a new event loop
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                try:
-                    file_path = loop.run_until_complete(download_media(url))
-                finally:
-                    loop.close()
-                
+                file_path = download_media(url)
                 if file_path:
                     platform = {
                         '/yt': 'YouTube',
