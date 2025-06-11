@@ -6,7 +6,6 @@ from datetime import datetime
 import yt_dlp
 import os
 import tempfile
-import subprocess
 
 app = Flask(__name__)
 
@@ -119,7 +118,7 @@ def generate_thumbnail(prompt):
     return {'status': 'error'}
 
 def download_media(url):
-    """Download media using cookies.txt for authentication"""
+    """Download media using cookies.txt for authentication - updated method"""
     try:
         temp_dir = tempfile.mkdtemp()
         
@@ -128,17 +127,17 @@ def download_media(url):
             'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
             'quiet': True,
             'cookiefile': COOKIES_FILE,
+            'extract_flat': False,
             'retries': 10,
             'fragment_retries': 10,
+            'ignoreerrors': True,
+            'no_warnings': False,
+            'socket_timeout': 30,
             'extractor_args': {
                 'youtube': {
                     'skip': ['dash', 'hls']
                 }
-            },
-            'socket_timeout': 30,
-            'noplaylist': True,
-            'ignoreerrors': True,
-            'no_warnings': False
+            }
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
