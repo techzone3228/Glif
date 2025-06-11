@@ -3,7 +3,6 @@ from waitress import serve
 import requests
 import logging
 from datetime import datetime
-import io
 import yt_dlp
 import os
 import tempfile
@@ -21,6 +20,7 @@ GREEN_API = {
     "mediaUrl": "https://7105.media.greenapi.com"
 }
 AUTHORIZED_NUMBER = "923401809397"
+COOKIES_FILE = "cookies.txt"  # Path to your cookies file
 
 # GLIF Configuration
 GLIF_ID = "cm0zceq2a00023f114o6hti7w"
@@ -119,21 +119,26 @@ def generate_thumbnail(prompt):
     return {'status': 'error'}
 
 def download_media(url):
-    """Download media from YouTube/TikTok/Twitter using yt-dlp with cookies"""
+    """Download media using cookies.txt for authentication"""
     try:
         temp_dir = tempfile.mkdtemp()
         
-        # Using the exact same yt-dlp options as your working script
         ydl_opts = {
             'format': 'best',
             'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
             'quiet': True,
-            'no_warnings': False,
+            'cookiefile': COOKIES_FILE,
+            'retries': 10,
+            'fragment_retries': 10,
+            'extractor_args': {
+                'youtube': {
+                    'skip': ['dash', 'hls']
+                }
+            },
+            'socket_timeout': 30,
+            'noplaylist': True,
             'ignoreerrors': True,
-            'retries': 3,
-            'fragment_retries': 3,
-            'extract_flat': False,
-            'force_generic_extractor': True
+            'no_warnings': False
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -150,6 +155,13 @@ def download_media(url):
     except Exception as e:
         logger.error(f"Media download failed: {str(e)}")
         return None
+    finally:
+        # Clean up temp directory if empty
+        try:
+            if os.path.exists(temp_dir) and not os.listdir(temp_dir):
+                os.rmdir(temp_dir)
+        except:
+            pass
 
 # ======================
 # WEBHOOK HANDLER
@@ -274,6 +286,12 @@ def health_check():
 # START SERVER
 # ======================
 if __name__ == '__main__':
+    # Verify cookies file exists
+    if not os.path.exists(COOKIES_FILE):
+        logger.warning(f"Cookies file not found at: {COOKIES_FILE}")
+    else:
+        logger.info(f"Using cookies file: {COOKIES_FILE}")
+    
     logger.info(f"""
     ============================================
     WhatsApp Media Bot READY
