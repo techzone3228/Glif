@@ -3,6 +3,7 @@ from waitress import serve
 import requests
 import logging
 from datetime import datetime
+import io
 import yt_dlp
 import os
 import tempfile
@@ -19,7 +20,6 @@ GREEN_API = {
     "mediaUrl": "https://7105.media.greenapi.com"
 }
 AUTHORIZED_NUMBER = "923401809397"
-COOKIES_FILE = "cookies.txt"  # Path to your cookies file
 
 # GLIF Configuration
 GLIF_ID = "cm0zceq2a00023f114o6hti7w"
@@ -118,49 +118,23 @@ def generate_thumbnail(prompt):
     return {'status': 'error'}
 
 def download_media(url):
-    """Download media using the exact working method from Telegram bot"""
+    """Download media from YouTube/TikTok/Twitter using yt-dlp"""
     try:
         temp_dir = tempfile.mkdtemp()
-        
         ydl_opts = {
             'format': 'best',
             'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
             'quiet': True,
-            'cookiefile': COOKIES_FILE,
-            'extract_flat': False,
-            'retries': 10,
-            'fragment_retries': 10,
-            'ignoreerrors': True,
-            'no_warnings': False,
-            'socket_timeout': 30,
-            'extractor_args': {
-                'youtube': {
-                    'skip': ['dash', 'hls']
-                }
-            }
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
-            if not info:
-                raise ValueError("Failed to extract video info")
-                
             filename = ydl.prepare_filename(info)
-            if not os.path.exists(filename):
-                raise FileNotFoundError("Downloaded file not found")
-                
             return filename
             
     except Exception as e:
         logger.error(f"Media download failed: {str(e)}")
         return None
-    finally:
-        # Clean up temp directory if empty
-        try:
-            if os.path.exists(temp_dir) and not os.listdir(temp_dir):
-                os.rmdir(temp_dir)
-        except:
-            pass
 
 # ======================
 # WEBHOOK HANDLER
@@ -243,9 +217,8 @@ def handle_webhook():
                     }[command]
                     send_whatsapp_file(file_path, f"🎥 {platform} Video", is_video=True)
                     os.remove(file_path)
-                    os.rmdir(os.path.dirname(file_path))  # Clean up temp directory
                 else:
-                    send_whatsapp_message("❌ Failed to download media. Please try again or check the URL.")
+                    send_whatsapp_message("❌ Failed to download media. Please check the URL.")
             else:
                 send_whatsapp_message("⚠️ Please provide a valid YouTube, TikTok, or Twitter URL")
         
@@ -285,12 +258,6 @@ def health_check():
 # START SERVER
 # ======================
 if __name__ == '__main__':
-    # Verify cookies file exists
-    if not os.path.exists(COOKIES_FILE):
-        logger.warning(f"Cookies file not found at: {COOKIES_FILE}")
-    else:
-        logger.info(f"Using cookies file: {COOKIES_FILE}")
-    
     logger.info(f"""
     ============================================
     WhatsApp Media Bot READY
