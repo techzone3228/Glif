@@ -136,10 +136,14 @@ def generate_thumbnail(prompt):
 def check_audio(filename):
     """Check if file has audio stream"""
     try:
-        cmd = f'ffprobe -i "{filename}" -show_streams -select_streams a -loglevel error'
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        result = subprocess.run(
+            ['ffprobe', '-i', filename, '-show_streams', '-select_streams', 'a', '-loglevel', 'error'],
+            capture_output=True,
+            text=True
+        )
         return "codec_type=audio" in result.stdout
-    except:
+    except Exception as e:
+        logger.error(f"Error checking audio: {str(e)}")
         return False
 
 def download_media(url, choice):
@@ -179,8 +183,8 @@ def download_media(url, choice):
             try:
                 if os.path.exists(temp_dir) and not os.listdir(temp_dir):
                     os.rmdir(temp_dir)
-            except:
-                pass
+            except Exception as e:
+                logger.warning(f"Error cleaning temp dir: {str(e)}")
     
     # Handle video downloads
     try:
@@ -218,15 +222,39 @@ def download_media(url, choice):
             video_format += f"[height<={resolution['name'][:-1]}]"
             
         video_path = os.path.join(temp_dir, "video.mp4")
-        !yt-dlp -f "{video_format}" -o "{video_path}" "{url}" --cookies "{COOKIES_FILE}" --quiet
+        subprocess.run([
+            "yt-dlp",
+            "-f", video_format,
+            "-o", video_path,
+            url,
+            "--cookies", COOKIES_FILE,
+            "--quiet"
+        ], check=True)
         
         # Download audio only
         audio_path = os.path.join(temp_dir, "audio.m4a")
-        !yt-dlp -f "bestaudio[ext=m4a]" -o "{audio_path}" "{url}" --cookies "{COOKIES_FILE}" --quiet
+        subprocess.run([
+            "yt-dlp",
+            "-f", "bestaudio[ext=m4a]",
+            "-o", audio_path,
+            url,
+            "--cookies", COOKIES_FILE,
+            "--quiet"
+        ], check=True)
         
         # Merge them
         final_path = os.path.join(temp_dir, "final.mp4")
-        !ffmpeg -i "{video_path}" -i "{audio_path}" -c:v copy -c:a aac -strict experimental "{final_path}" -y -loglevel error
+        subprocess.run([
+            "ffmpeg",
+            "-i", video_path,
+            "-i", audio_path,
+            "-c:v", "copy",
+            "-c:a", "aac",
+            "-strict", "experimental",
+            final_path,
+            "-y",
+            "-loglevel", "error"
+        ], check=True)
         
         # Clean up
         if os.path.exists(video_path):
@@ -244,8 +272,8 @@ def download_media(url, choice):
         try:
             if os.path.exists(temp_dir) and not os.listdir(temp_dir):
                 os.rmdir(temp_dir)
-        except:
-            pass
+        except Exception as e:
+            logger.warning(f"Error cleaning temp dir: {str(e)}")
 
 def send_resolution_options(sender):
     """Send resolution options to user"""
