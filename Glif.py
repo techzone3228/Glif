@@ -6,7 +6,6 @@ from datetime import datetime
 import yt_dlp
 import os
 import tempfile
-import re
 import subprocess
 
 app = Flask(__name__)
@@ -22,37 +21,6 @@ GREEN_API = {
 }
 AUTHORIZED_NUMBER = "923401809397"
 COOKIES_FILE = "cookies.txt"
-
-# GLIF Configuration
-GLIF_ID = "cm0zceq2a00023f114o6hti7w"
-GLIF_TOKENS = [
-    "glif_a4ef6d3aa5d8575ea8448b29e293919a42a6869143fcbfc32f2e4a7dbe53199a",
-    "glif_51d216db54438b777c4170cd8913d628ff0af09789ed5dbcbd718fa6c6968bb1",
-    "glif_c9dc66b31537b5a423446bbdead5dc2dbd73dc1f4a5c47a9b77328abcbc7b755",
-    "glif_f5a55ee6d767b79f2f3af01c276ec53d14475eace7cabf34b22f8e5968f3fef5",
-    "glif_c3a7fd4779b59f59c08d17d4a7db46beefa3e9e49a9ebc4921ecaca35c556ab7",
-    "glif_b31fdc2c9a7aaac0ec69d5f59bf05ccea0c5786990ef06b79a1d7db8e37ba317"
-]
-
-# Supported domains for downloader
-SUPPORTED_DOMAINS = [
-    "youtube.com",
-    "youtu.be",
-    "tiktok.com",
-    "twitter.com",
-    "x.com"
-]
-
-# Resolution options with guaranteed audio
-RESOLUTIONS = {
-    '1': {'name': '144p', 'format': '160'},
-    '2': {'name': '360p', 'format': '18'},
-    '3': {'name': '480p', 'format': '135'},
-    '4': {'name': '720p', 'format': '22'},
-    '5': {'name': '1080p', 'format': 'bestvideo[height<=1080]+bestaudio'},
-    '6': {'name': 'Best', 'format': 'bestvideo+bestaudio'},
-    '7': {'name': 'MP3', 'format': 'bestaudio/best', 'ext': 'mp3'}
-}
 
 # User session data
 user_sessions = {}
@@ -111,181 +79,100 @@ def send_whatsapp_file(file_path, caption, is_video=False):
         logger.error(f"File upload failed: {str(e)}")
         return False
 
-def generate_thumbnail(prompt):
-    """Generate thumbnail using GLIF API"""
-    prompt = prompt[:100]  # Limit prompt length
-    for token in GLIF_TOKENS:
-        try:
-            response = requests.post(
-                f"https://simple-api.glif.app/{GLIF_ID}",
-                headers={"Authorization": f"Bearer {token}"},
-                json={"prompt": prompt, "style": "youtube_trending"},
-                timeout=30
-            )
-            data = response.json()
-            
-            # Check all possible response formats
-            for key in ["output", "image_url", "url"]:
-                if key in data and isinstance(data[key], str) and data[key].startswith('http'):
-                    logger.info(f"Generated thumbnail using token {token[-6:]}")
-                    return {'status': 'success', 'image_url': data[key]}
-        except Exception as e:
-            logger.warning(f"GLIF token {token[-6:]} failed: {str(e)}")
-    return {'status': 'error'}
-
-def check_audio(filename):
-    """Check if file has audio stream"""
+def get_available_formats(url):
+    """Get available formats for the media"""
     try:
-        result = subprocess.run(
-            ['ffprobe', '-i', filename, '-show_streams', '-select_streams', 'a', '-loglevel', 'error'],
-            capture_output=True,
-            text=True
-        )
-        return "codec_type=audio" in result.stdout
+        ydl_opts = {'quiet': True}
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            formats = info.get('formats', [])
+            return formats
     except Exception as e:
-        logger.error(f"Error checking audio: {str(e)}")
-        return False
+        logger.error(f"Error getting formats: {str(e)}")
+        return []
 
-def download_media(url, choice):
-    """Download YouTube media with selected option"""
-    resolution = RESOLUTIONS.get(choice, RESOLUTIONS['6'])
-    
-    # Handle MP3 download
-    if choice == '7':
-        try:
-            temp_dir = tempfile.mkdtemp()
-            ydl_opts = {
-                'format': 'bestaudio/best',
-                'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
-                'postprocessors': [{
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'mp3',
-                    'preferredquality': '192',
-                }],
-                'cookiefile': COOKIES_FILE,
-                'quiet': True
-            }
-            
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                filename = ydl.prepare_filename(info)
-                mp3_file = filename.replace('.webm', '.mp3').replace('.m4a', '.mp3')
-                
-                if os.path.exists(mp3_file):
-                    return mp3_file, info.get('title', 'audio')
-            return None, None
-            
-        except Exception as e:
-            logger.error(f"Error downloading MP3: {str(e)}")
-            return None, None
-        finally:
-            # Clean up temp directory if empty
-            try:
-                if os.path.exists(temp_dir) and not os.listdir(temp_dir):
-                    os.rmdir(temp_dir)
-            except Exception as e:
-                logger.warning(f"Error cleaning temp dir: {str(e)}")
-    
-    # Handle video downloads
+def download_media(url, format_id=None):
+    """Download media with selected format"""
     try:
         temp_dir = tempfile.mkdtemp()
-        
-        # First try normal download
         ydl_opts = {
-            'format': resolution['format'],
             'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
-            'cookiefile': COOKIES_FILE,
-            'merge_output_format': 'mp4',
+            'quiet': False,
+            'no_warnings': False,
+            'writethumbnail': True,
             'postprocessors': [
-                {'key': 'FFmpegVideoConvertor', 'preferedformat': 'mp4'},
                 {'key': 'FFmpegMetadata'},
                 {'key': 'EmbedThumbnail'}
             ],
-            'quiet': True
         }
-        
+
+        if format_id:
+            ydl_opts['format'] = format_id
+        else:
+            ydl_opts['format'] = 'bestvideo+bestaudio/best'
+            ydl_opts['merge_output_format'] = 'mp4'
+
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             filename = ydl.prepare_filename(info)
             
-            if check_audio(filename):
-                new_filename = f"{os.path.splitext(filename)[0]}_{resolution['name']}.mp4"
-                os.rename(filename, new_filename)
-                return new_filename, info.get('title', 'video')
-        
-        # If no audio, force separate download and merge
-        logger.warning("Audio missing - forcing separate audio/video download...")
-        
-        # Download video only
-        video_format = "bestvideo[ext=mp4]"
-        if resolution['name'][-1] == 'p' and resolution['name'][:-1].isdigit():
-            video_format += f"[height<={resolution['name'][:-1]}]"
+            # Find the actual downloaded file (might have different extension)
+            base_name = os.path.splitext(filename)[0]
+            for f in os.listdir(temp_dir):
+                if f.startswith(os.path.basename(base_name)):
+                    actual_file = os.path.join(temp_dir, f)
+                    return actual_file, info.get('title', 'media')
             
-        video_path = os.path.join(temp_dir, "video.mp4")
-        subprocess.run([
-            "yt-dlp",
-            "-f", video_format,
-            "-o", video_path,
-            url,
-            "--cookies", COOKIES_FILE,
-            "--quiet"
-        ], check=True)
-        
-        # Download audio only
-        audio_path = os.path.join(temp_dir, "audio.m4a")
-        subprocess.run([
-            "yt-dlp",
-            "-f", "bestaudio[ext=m4a]",
-            "-o", audio_path,
-            url,
-            "--cookies", COOKIES_FILE,
-            "--quiet"
-        ], check=True)
-        
-        # Merge them
-        final_path = os.path.join(temp_dir, "final.mp4")
-        subprocess.run([
-            "ffmpeg",
-            "-i", video_path,
-            "-i", audio_path,
-            "-c:v", "copy",
-            "-c:a", "aac",
-            "-strict", "experimental",
-            final_path,
-            "-y",
-            "-loglevel", "error"
-        ], check=True)
-        
-        # Clean up
-        if os.path.exists(video_path):
-            os.remove(video_path)
-        if os.path.exists(audio_path):
-            os.remove(audio_path)
-            
-        return final_path, info.get('title', 'video')
+            return filename, info.get('title', 'media')
             
     except Exception as e:
-        logger.error(f"Error downloading video: {str(e)}")
+        logger.error(f"Error downloading media: {str(e)}")
         return None, None
     finally:
-        # Clean up temp directory if empty
-        try:
-            if os.path.exists(temp_dir) and not os.listdir(temp_dir):
-                os.rmdir(temp_dir)
-        except Exception as e:
-            logger.warning(f"Error cleaning temp dir: {str(e)}")
+        # Clean up other files in temp directory except the downloaded file
+        pass
 
-def send_resolution_options(sender):
-    """Send resolution options to user"""
-    options_text = "📺 Please select download option:\n\n"
-    options_text += "1. 144p (Lowest video quality)\n"
-    options_text += "2. 360p (Low video quality)\n"
-    options_text += "3. 480p (Medium video quality)\n"
-    options_text += "4. 720p (HD video quality)\n"
-    options_text += "5. 1080p (Full HD video quality)\n"
-    options_text += "6. Best video quality\n"
-    options_text += "7. MP3 (Audio only)\n\n"
-    options_text += "Reply with the number (1-7) of your choice"
+def send_format_options(sender, url):
+    """Send available format options to user"""
+    formats = get_available_formats(url)
+    if not formats:
+        send_whatsapp_message("❌ Could not get available formats for this URL")
+        return
+
+    # Group formats by quality
+    video_formats = {}
+    audio_formats = {}
+    
+    for f in formats:
+        if f.get('acodec') != 'none' and f.get('vcodec') != 'none':
+            # Video format
+            res = f.get('height', 0)
+            if res not in video_formats:
+                video_formats[res] = f['format_id']
+        elif f.get('acodec') != 'none':
+            # Audio format
+            abr = f.get('abr', 0)
+            if abr not in audio_formats:
+                audio_formats[abr] = f['format_id']
+
+    # Prepare options text
+    options_text = "📺 Available Download Options:\n\n"
+    options_text += "🎥 Video Formats:\n"
+    for res, fmt_id in sorted(video_formats.items(), reverse=True):
+        options_text += f"- {res}p (ID: {fmt_id})\n"
+    
+    options_text += "\n🎧 Audio Formats:\n"
+    for abr, fmt_id in sorted(audio_formats.items(), reverse=True):
+        options_text += f"- {abr}kbps (ID: {fmt_id})\n"
+    
+    options_text += "\n🔢 Reply with the format ID of your choice"
+    options_text += "\n⚡ Or reply 'best' for automatic best quality"
+    
+    # Store the URL in user session
+    user_sessions[sender] = {
+        'url': url,
+        'awaiting_format': True
+    }
     
     send_whatsapp_message(options_text)
 
@@ -320,123 +207,45 @@ def handle_webhook():
 
         logger.info(f"PROCESSING MESSAGE FROM {AUTHORIZED_NUMBER}: {message}")
 
-        # Check if this is a resolution selection
-        if sender in user_sessions and user_sessions[sender].get('awaiting_resolution'):
-            try:
-                choice = message.strip()
-                if choice in RESOLUTIONS:
-                    # Get the stored URL
-                    url = user_sessions[sender]['url']
-                    del user_sessions[sender]  # Clear the session
-                    
-                    if choice == '7':
-                        send_whatsapp_message("⬇️ Downloading MP3 audio...")
-                        file_path, title = download_media(url, choice)
-                        if file_path:
-                            send_whatsapp_file(file_path, f"🎵 {title}", is_video=False)
-                            os.remove(file_path)
-                            os.rmdir(os.path.dirname(file_path))
-                        else:
-                            send_whatsapp_message("❌ Failed to download audio. Please try again.")
-                    else:
-                        send_whatsapp_message(f"⬇️ Downloading {RESOLUTIONS[choice]['name']} quality...")
-                        file_path, title = download_media(url, choice)
-                        if file_path:
-                            send_whatsapp_file(file_path, f"🎥 {title}\nQuality: {RESOLUTIONS[choice]['name']}", is_video=True)
-                            os.remove(file_path)
-                            os.rmdir(os.path.dirname(file_path))
-                        else:
-                            send_whatsapp_message("❌ Failed to download media. Please try again.")
-                else:
-                    send_whatsapp_message("❌ Invalid choice. Please select a number between 1-7.")
-                    send_resolution_options(sender)
-                return jsonify({'status': 'processed'})
-            except Exception as e:
-                logger.error(f"Error processing resolution choice: {str(e)}")
-                send_whatsapp_message("❌ Invalid input. Please try again.")
-                return jsonify({'status': 'processed'})
+        # Check if this is a format selection
+        if sender in user_sessions and user_sessions[sender].get('awaiting_format'):
+            url = user_sessions[sender]['url']
+            del user_sessions[sender]  # Clear the session
+            
+            if message.lower() == 'best':
+                format_id = None
+                send_whatsapp_message("⬇️ Downloading best quality...")
+            else:
+                format_id = message.strip()
+                send_whatsapp_message(f"⬇️ Downloading format {format_id}...")
+            
+            file_path, title = download_media(url, format_id)
+            if file_path:
+                is_video = file_path.endswith(('.mp4', '.mkv', '.webm'))
+                send_whatsapp_file(file_path, f"📦 {title}", is_video=is_video)
+                os.remove(file_path)
+                os.rmdir(os.path.dirname(file_path))
+            else:
+                send_whatsapp_message("❌ Failed to download media. Please try again.")
+            return jsonify({'status': 'processed'})
+
+        # Check if message contains a URL
+        if any(proto in message.lower() for proto in ['http://', 'https://']):
+            send_whatsapp_message("🔍 Analyzing URL...")
+            send_format_options(sender, message)
+            return jsonify({'status': 'processed'})
 
         # Command handling
         if message.lower() in ['hi', 'hello', 'hey']:
             help_text = """👋 Hi! Here's what I can do:
-/yt [YouTube URL] - Download YouTube video/audio
-/tt [TikTok URL] - Download TikTok video
-/tw [Twitter URL] - Download Twitter video
-/thumbnail [prompt] - Generate custom thumbnail
-/help - Show this message"""
+- Send any video URL to download
+- I support 1000+ sites including YouTube, Instagram, Twitter, etc.
+- I'll show you available quality options"""
             send_whatsapp_message(help_text)
+            return jsonify({'status': 'processed'})
         
-        elif message.lower().startswith(('/help', 'help', 'info')):
-            help_text = """ℹ️ Available Commands:
-/yt [URL] - Download YouTube video/audio (choose quality)
-/tt [URL] - Download TikTok video
-/tw [URL] - Download Twitter video
-/thumbnail [prompt] - Generate thumbnail
-/help - Show this message"""
-            send_whatsapp_message(help_text)
-        
-        elif message.lower().startswith('/thumbnail '):
-            prompt = message[11:].strip()
-            if prompt:
-                send_whatsapp_message("🔄 Generating your thumbnail... (20-30 seconds)")
-                result = generate_thumbnail(prompt)
-                if result['status'] == 'success':
-                    # Download the image first
-                    response = requests.get(result['image_url'])
-                    temp_file = os.path.join(tempfile.gettempdir(), "thumbnail.jpg")
-                    with open(temp_file, 'wb') as f:
-                        f.write(response.content)
-                    # Send as file with caption
-                    send_whatsapp_file(temp_file, f"🎨 Thumbnail for: {prompt}")
-                    send_whatsapp_message(f"🔗 Direct URL: {result['image_url']}")
-                    os.remove(temp_file)
-                else:
-                    send_whatsapp_message("❌ Failed to generate. Please try different keywords.")
-        
-        elif message.lower().startswith('/yt '):
-            url = message[4:].strip()
-            if any(domain in url for domain in ['youtube.com', 'youtu.be']):
-                # Store the URL and ask for resolution
-                user_sessions[sender] = {
-                    'url': url,
-                    'awaiting_resolution': True
-                }
-                send_resolution_options(sender)
-            else:
-                send_whatsapp_message("⚠️ Please provide a valid YouTube URL")
-        
-        elif any(message.lower().startswith(cmd) for cmd in ['/tt ', '/tw ']):
-            command, url = message.split(' ', 1)
-            if any(domain in url for domain in ['tiktok.com', 'twitter.com', 'x.com']):
-                send_whatsapp_message("⬇️ Downloading media... (this may take a while)")
-                file_path, title = download_media(url, '6')  # Use best quality for non-YouTube
-                if file_path:
-                    platform = {
-                        '/tt': 'TikTok',
-                        '/tw': 'Twitter'
-                    }[command]
-                    send_whatsapp_file(file_path, f"🎥 {platform} Video: {title}", is_video=True)
-                    os.remove(file_path)
-                    os.rmdir(os.path.dirname(file_path))
-                else:
-                    send_whatsapp_message("❌ Failed to download media. Please try again or check the URL.")
-            else:
-                send_whatsapp_message("⚠️ Please provide a valid TikTok or Twitter URL")
-        
-        elif len(message) > 3:  # Fallback to thumbnail generation
-            send_whatsapp_message("🔄 Generating your thumbnail... (20-30 seconds)")
-            result = generate_thumbnail(message)
-            if result['status'] == 'success':
-                response = requests.get(result['image_url'])
-                temp_file = os.path.join(tempfile.gettempdir(), "thumbnail.jpg")
-                with open(temp_file, 'wb') as f:
-                    f.write(response.content)
-                send_whatsapp_file(temp_file, f"🎨 Thumbnail for: {message}")
-                send_whatsapp_message(f"🔗 Direct URL: {result['image_url']}")
-                os.remove(temp_file)
-            else:
-                send_whatsapp_message("❌ Failed to generate. Please try different keywords.")
-
+        # Default response
+        send_whatsapp_message("📌 Please send me a video URL to download")
         return jsonify({'status': 'processed'})
 
     except Exception as e:
