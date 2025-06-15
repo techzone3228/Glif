@@ -7,6 +7,7 @@ import yt_dlp
 import os
 import tempfile
 import re
+import subprocess
 
 app = Flask(__name__)
 
@@ -42,14 +43,14 @@ SUPPORTED_DOMAINS = [
     "x.com"
 ]
 
-# Resolution options
+# Resolution options with WhatsApp-compatible formats
 RESOLUTIONS = {
-    '144p': {'format': '160', 'height': 144},
-    '360p': {'format': '18', 'height': 360},
-    '480p': {'format': '135', 'height': 480},
-    '720p': {'format': '22', 'height': 720},
-    '1080p': {'format': '137', 'height': 1080},
-    'best': {'format': 'best', 'height': None}
+    '144p': {'format': '160', 'height': 144, 'vcodec': 'mp4v'},
+    '360p': {'format': '18', 'height': 360, 'vcodec': 'mp4v'},
+    '480p': {'format': '135', 'height': 480, 'vcodec': 'mp4v'},
+    '720p': {'format': '22', 'height': 720, 'vcodec': 'mp4v'},
+    '1080p': {'format': '137+140', 'height': 1080, 'vcodec': 'mp4v'},
+    'best': {'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best', 'vcodec': 'mp4v'}
 }
 
 # User session data to track resolution selection
@@ -131,8 +132,33 @@ def generate_thumbnail(prompt):
             logger.warning(f"GLIF token {token[-6:]} failed: {str(e)}")
     return {'status': 'error'}
 
+def convert_to_whatsapp_compatible(input_path, output_path):
+    """Convert video to WhatsApp compatible format using ffmpeg"""
+    try:
+        command = [
+            'ffmpeg',
+            '-i', input_path,
+            '-c:v', 'libx264',
+            '-profile:v', 'baseline',
+            '-level', '3.0',
+            '-pix_fmt', 'yuv420p',
+            '-c:a', 'aac',
+            '-b:a', '128k',
+            '-movflags', 'faststart',
+            '-y',
+            output_path
+        ]
+        subprocess.run(command, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        return True
+    except subprocess.CalledProcessError as e:
+        logger.error(f"FFmpeg conversion failed: {str(e)}")
+        return False
+    except Exception as e:
+        logger.error(f"Error in video conversion: {str(e)}")
+        return False
+
 def download_media(url, resolution='best'):
-    """Download media with specified resolution"""
+    """Download media with specified resolution and ensure WhatsApp compatibility"""
     try:
         temp_dir = tempfile.mkdtemp()
         resolution_config = RESOLUTIONS.get(resolution, RESOLUTIONS['best'])
@@ -148,6 +174,11 @@ def download_media(url, resolution='best'):
             'ignoreerrors': True,
             'no_warnings': False,
             'socket_timeout': 30,
+            'merge_output_format': 'mp4',
+            'postprocessors': [{
+                'key': 'FFmpegVideoConvertor',
+                'preferedformat': 'mp4'
+            }],
             'extractor_args': {
                 'youtube': {
                     'skip': ['dash', 'hls']
@@ -160,11 +191,17 @@ def download_media(url, resolution='best'):
             if not info:
                 raise ValueError("Failed to extract video info")
                 
-            filename = ydl.prepare_filename(info)
-            if not os.path.exists(filename):
+            original_filename = ydl.prepare_filename(info)
+            if not os.path.exists(original_filename):
                 raise FileNotFoundError("Downloaded file not found")
+            
+            # Convert to WhatsApp compatible format
+            final_filename = os.path.join(temp_dir, f"whatsapp_{os.path.basename(original_filename)}")
+            if not convert_to_whatsapp_compatible(original_filename, final_filename):
+                logger.warning("Using original file as fallback")
+                final_filename = original_filename
                 
-            return filename, info.get('title', 'video')
+            return final_filename, info.get('title', 'video')
             
     except Exception as e:
         logger.error(f"Media download failed: {str(e)}")
@@ -233,15 +270,15 @@ def handle_webhook():
                     url = user_sessions[sender]['url']
                     del user_sessions[sender]  # Clear the session
                     
-                    send_whatsapp_message(f"⬇️ Downloading {selected_resolution} quality...")
+                    send_whatsapp_message(f"⬇️ Downloading {selected_resolution} quality... (may take a few minutes)")
                     file_path, title = download_media(url, selected_resolution)
                     
-                    if file_path:
+                    if file_path and title:
                         send_whatsapp_file(file_path, f"🎥 {title}\nQuality: {selected_resolution}", is_video=True)
                         os.remove(file_path)
                         os.rmdir(os.path.dirname(file_path))
                     else:
-                        send_whatsapp_message("❌ Failed to download media. Please try again.")
+                        send_whatsapp_message("❌ Failed to download media. Please try again later.")
                 else:
                     send_whatsapp_message("❌ Invalid choice. Please select a number between 1-6.")
                     send_resolution_options(sender)
@@ -254,7 +291,7 @@ def handle_webhook():
         # Command handling
         if message.lower() in ['hi', 'hello', 'hey']:
             help_text = """👋 Hi! Here's what I can do:
-/yt [YouTube URL] - Download YouTube video
+/yt [YouTube URL] - Download YouTube video (choose quality)
 /tt [TikTok URL] - Download TikTok video
 /tw [Twitter URL] - Download Twitter video
 /thumbnail [prompt] - Generate custom thumbnail
@@ -263,7 +300,7 @@ def handle_webhook():
         
         elif message.lower().startswith(('/help', 'help', 'info')):
             help_text = """ℹ️ Available Commands:
-/yt [URL] - Download YouTube video (with quality options)
+/yt [URL] - Download YouTube video with quality options
 /tt [URL] - Download TikTok video
 /tw [URL] - Download Twitter video
 /thumbnail [prompt] - Generate thumbnail
@@ -298,14 +335,14 @@ def handle_webhook():
                 }
                 send_resolution_options(sender)
             else:
-                send_whatsapp_message("⚠️ Please provide a valid YouTube URL")
+                send_whatsapp_message("⚠️ Please provide a valid YouTube URL (e.g., /yt https://youtube.com/watch?v=...)")
         
         elif any(message.lower().startswith(cmd) for cmd in ['/tt ', '/tw ']):
             command, url = message.split(' ', 1)
             if any(domain in url for domain in ['tiktok.com', 'twitter.com', 'x.com']):
                 send_whatsapp_message("⬇️ Downloading media... (this may take a while)")
                 file_path, title = download_media(url)
-                if file_path:
+                if file_path and title:
                     platform = {
                         '/tt': 'TikTok',
                         '/tw': 'Twitter'
