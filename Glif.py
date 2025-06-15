@@ -6,6 +6,7 @@ from datetime import datetime
 import yt_dlp
 import os
 import tempfile
+import re
 
 app = Flask(__name__)
 
@@ -40,6 +41,19 @@ SUPPORTED_DOMAINS = [
     "twitter.com",
     "x.com"
 ]
+
+# Resolution options
+RESOLUTIONS = {
+    '144p': {'format': '160', 'height': 144},
+    '360p': {'format': '18', 'height': 360},
+    '480p': {'format': '135', 'height': 480},
+    '720p': {'format': '22', 'height': 720},
+    '1080p': {'format': '137', 'height': 1080},
+    'best': {'format': 'best', 'height': None}
+}
+
+# User session data to track resolution selection
+user_sessions = {}
 
 # ======================
 # LOGGING SETUP
@@ -117,13 +131,14 @@ def generate_thumbnail(prompt):
             logger.warning(f"GLIF token {token[-6:]} failed: {str(e)}")
     return {'status': 'error'}
 
-def download_media(url):
-    """Download media using the exact working method from Telegram bot"""
+def download_media(url, resolution='best'):
+    """Download media with specified resolution"""
     try:
         temp_dir = tempfile.mkdtemp()
+        resolution_config = RESOLUTIONS.get(resolution, RESOLUTIONS['best'])
         
         ydl_opts = {
-            'format': 'best',
+            'format': resolution_config['format'],
             'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
             'quiet': True,
             'cookiefile': COOKIES_FILE,
@@ -149,11 +164,11 @@ def download_media(url):
             if not os.path.exists(filename):
                 raise FileNotFoundError("Downloaded file not found")
                 
-            return filename
+            return filename, info.get('title', 'video')
             
     except Exception as e:
         logger.error(f"Media download failed: {str(e)}")
-        return None
+        return None, None
     finally:
         # Clean up temp directory if empty
         try:
@@ -161,6 +176,19 @@ def download_media(url):
                 os.rmdir(temp_dir)
         except:
             pass
+
+def send_resolution_options(sender):
+    """Send resolution options to user"""
+    options_text = "📺 Please select video resolution:\n\n"
+    options_text += "1. 144p (Lowest quality)\n"
+    options_text += "2. 360p (Low quality)\n"
+    options_text += "3. 480p (Medium quality)\n"
+    options_text += "4. 720p (HD quality)\n"
+    options_text += "5. 1080p (Full HD)\n"
+    options_text += "6. Best available quality\n\n"
+    options_text += "Reply with the number (1-6) of your choice"
+    
+    send_whatsapp_message(options_text)
 
 # ======================
 # WEBHOOK HANDLER
@@ -193,6 +221,36 @@ def handle_webhook():
 
         logger.info(f"PROCESSING MESSAGE FROM {AUTHORIZED_NUMBER}: {message}")
 
+        # Check if this is a resolution selection
+        if sender in user_sessions and user_sessions[sender].get('awaiting_resolution'):
+            try:
+                choice = int(message)
+                if 1 <= choice <= 6:
+                    resolutions = ['144p', '360p', '480p', '720p', '1080p', 'best']
+                    selected_resolution = resolutions[choice - 1]
+                    
+                    # Get the stored URL
+                    url = user_sessions[sender]['url']
+                    del user_sessions[sender]  # Clear the session
+                    
+                    send_whatsapp_message(f"⬇️ Downloading {selected_resolution} quality...")
+                    file_path, title = download_media(url, selected_resolution)
+                    
+                    if file_path:
+                        send_whatsapp_file(file_path, f"🎥 {title}\nQuality: {selected_resolution}", is_video=True)
+                        os.remove(file_path)
+                        os.rmdir(os.path.dirname(file_path))
+                    else:
+                        send_whatsapp_message("❌ Failed to download media. Please try again.")
+                else:
+                    send_whatsapp_message("❌ Invalid choice. Please select a number between 1-6.")
+                    send_resolution_options(sender)
+                return jsonify({'status': 'processed'})
+            except ValueError:
+                send_whatsapp_message("❌ Please enter a number between 1-6 to select resolution.")
+                send_resolution_options(sender)
+                return jsonify({'status': 'processed'})
+
         # Command handling
         if message.lower() in ['hi', 'hello', 'hey']:
             help_text = """👋 Hi! Here's what I can do:
@@ -205,7 +263,7 @@ def handle_webhook():
         
         elif message.lower().startswith(('/help', 'help', 'info')):
             help_text = """ℹ️ Available Commands:
-/yt [URL] - Download YouTube video
+/yt [URL] - Download YouTube video (with quality options)
 /tt [URL] - Download TikTok video
 /tw [URL] - Download Twitter video
 /thumbnail [prompt] - Generate thumbnail
@@ -230,24 +288,35 @@ def handle_webhook():
                 else:
                     send_whatsapp_message("❌ Failed to generate. Please try different keywords.")
         
-        elif any(message.lower().startswith(cmd) for cmd in ['/yt ', '/tt ', '/tw ']):
+        elif message.lower().startswith('/yt '):
+            url = message[4:].strip()
+            if any(domain in url for domain in ['youtube.com', 'youtu.be']):
+                # Store the URL and ask for resolution
+                user_sessions[sender] = {
+                    'url': url,
+                    'awaiting_resolution': True
+                }
+                send_resolution_options(sender)
+            else:
+                send_whatsapp_message("⚠️ Please provide a valid YouTube URL")
+        
+        elif any(message.lower().startswith(cmd) for cmd in ['/tt ', '/tw ']):
             command, url = message.split(' ', 1)
-            if any(domain in url for domain in SUPPORTED_DOMAINS):
+            if any(domain in url for domain in ['tiktok.com', 'twitter.com', 'x.com']):
                 send_whatsapp_message("⬇️ Downloading media... (this may take a while)")
-                file_path = download_media(url)
+                file_path, title = download_media(url)
                 if file_path:
                     platform = {
-                        '/yt': 'YouTube',
                         '/tt': 'TikTok',
                         '/tw': 'Twitter'
                     }[command]
-                    send_whatsapp_file(file_path, f"🎥 {platform} Video", is_video=True)
+                    send_whatsapp_file(file_path, f"🎥 {platform} Video: {title}", is_video=True)
                     os.remove(file_path)
-                    os.rmdir(os.path.dirname(file_path))  # Clean up temp directory
+                    os.rmdir(os.path.dirname(file_path))
                 else:
                     send_whatsapp_message("❌ Failed to download media. Please try again or check the URL.")
             else:
-                send_whatsapp_message("⚠️ Please provide a valid YouTube, TikTok, or Twitter URL")
+                send_whatsapp_message("⚠️ Please provide a valid TikTok or Twitter URL")
         
         elif len(message) > 3:  # Fallback to thumbnail generation
             send_whatsapp_message("🔄 Generating your thumbnail... (20-30 seconds)")
