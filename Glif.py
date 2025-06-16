@@ -180,7 +180,8 @@ def send_format_options(sender, url):
     
     seen_audio = set()
     unique_audio = []
-    for a in sorted(audio_formats, key=lambda x: int(x['quality'].replace('kbps', '')), reverse=True):
+    # Replace the problematic line with:
+for a in sorted(audio_formats, key=lambda x: float(x['quality'].replace('kbps', '')), reverse=True):
         if a['quality'] not in seen_audio:
             seen_audio.add(a['quality'])
             unique_audio.append(a)
