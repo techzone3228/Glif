@@ -173,15 +173,14 @@ def send_format_options(sender, url):
     # Remove duplicate qualities
     seen_video = set()
     unique_video = []
-    for v in sorted(video_formats, key=lambda x: int(x['quality'].replace('p', '')), reverse=True):
+    for v in sorted(video_formats, key=lambda x: float(x['quality'].replace('p', '')), reverse=True):
         if v['quality'] not in seen_video:
             seen_video.add(v['quality'])
             unique_video.append(v)
     
     seen_audio = set()
     unique_audio = []
-    # Replace the problematic line with:
-for a in sorted(audio_formats, key=lambda x: float(x['quality'].replace('kbps', '')), reverse=True):
+    for a in sorted(audio_formats, key=lambda x: float(x['quality'].replace('kbps', '')), reverse=True):
         if a['quality'] not in seen_audio:
             seen_audio.add(a['quality'])
             unique_audio.append(a)
