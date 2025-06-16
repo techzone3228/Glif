@@ -21,7 +21,7 @@ GREEN_API = {
     "mediaUrl": "https://7105.media.greenapi.com"
 }
 AUTHORIZED_NUMBER = "923401809397"
-COOKIES_FILE = "cookies.txt"
+COOKIES_FILE = "cookies.txt"  # Make sure this file exists in your root directory
 
 # GLIF Configuration
 GLIF_ID = "cm0zceq2a00023f114o6hti7w"
@@ -121,6 +121,14 @@ def get_available_formats(url):
         'extract_flat': False,
     }
     
+    # Add cookies for YouTube if available
+    if 'youtube.com' in url or 'youtu.be' in url:
+        if os.path.exists(COOKIES_FILE):
+            ydl_opts['cookiefile'] = COOKIES_FILE
+            logger.info("Using cookies.txt for YouTube authentication")
+        else:
+            logger.warning("YouTube cookies file not found, may encounter restrictions")
+    
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         try:
             info = ydl.extract_info(url, download=False)
@@ -152,12 +160,16 @@ def download_media(url, format_id=None, audio_only=False):
             'merge_output_format': 'mp4',
             'quiet': True,
             'no_warnings': True,
-            'cookiefile': COOKIES_FILE,
             'postprocessors': [
                 {'key': 'FFmpegMetadata'},
                 {'key': 'EmbedThumbnail'}
             ],
         }
+        
+        # Add cookies for YouTube if available
+        if ('youtube.com' in url or 'youtu.be' in url) and os.path.exists(COOKIES_FILE):
+            ydl_opts['cookiefile'] = COOKIES_FILE
+            logger.info("Using cookies.txt for YouTube download")
         
         if audio_only:
             ydl_opts['format'] = 'bestaudio/best'
