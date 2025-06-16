@@ -6,7 +6,6 @@ from datetime import datetime
 import yt_dlp
 import os
 import tempfile
-import re
 import subprocess
 
 app = Flask(__name__)
@@ -21,7 +20,7 @@ GREEN_API = {
     "mediaUrl": "https://7105.media.greenapi.com"
 }
 AUTHORIZED_NUMBER = "923401809397"
-COOKIES_FILE = "cookies.txt"  # Make sure this file exists in your root directory
+COOKIES_FILE = "cookies.txt"
 
 # GLIF Configuration
 GLIF_ID = "cm0zceq2a00023f114o6hti7w"
@@ -113,128 +112,116 @@ def generate_thumbnail(prompt):
             logger.warning(f"GLIF token {token[-6:]} failed: {str(e)}")
     return {'status': 'error'}
 
-def get_available_formats(url):
-    """Get available formats for a URL"""
-    ydl_opts = {
-        'quiet': True,
-        'no_warnings': True,
-        'extract_flat': False,
-    }
-    
-    # Add cookies for YouTube if available
-    if 'youtube.com' in url or 'youtu.be' in url:
-        if os.path.exists(COOKIES_FILE):
-            ydl_opts['cookiefile'] = COOKIES_FILE
-            logger.info("Using cookies.txt for YouTube authentication")
-        else:
-            logger.warning("YouTube cookies file not found, may encounter restrictions")
-    
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        try:
-            info = ydl.extract_info(url, download=False)
-            formats = info.get('formats', [])
-            audio_formats = [f for f in formats if f.get('acodec') != 'none' and f.get('vcodec') == 'none']
-            video_formats = [f for f in formats if f.get('vcodec') != 'none']
-            
-            # Sort video formats by resolution
-            video_formats.sort(key=lambda x: x.get('height', 0), reverse=True)
-            
-            return {
-                'title': info.get('title', 'Untitled'),
-                'thumbnail': info.get('thumbnail', ''),
-                'audio_formats': audio_formats,
-                'video_formats': video_formats,
-                'extractor': info.get('extractor', 'generic')
-            }
-        except Exception as e:
-            logger.error(f"Error getting formats: {str(e)}")
-            return None
-
-def download_media(url, format_id=None, audio_only=False):
-    """Download media with selected format"""
-    temp_dir = tempfile.mkdtemp()
+def check_audio(filename):
+    """Check if file has audio stream"""
     try:
-        ydl_opts = {
-            'format': f'{format_id}' if format_id else 'bestvideo+bestaudio/best',
-            'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
-            'merge_output_format': 'mp4',
-            'quiet': True,
-            'no_warnings': True,
-            'postprocessors': [
-                {'key': 'FFmpegMetadata'},
-                {'key': 'EmbedThumbnail'}
-            ],
-        }
+        result = subprocess.run(
+            ['ffprobe', '-i', filename, '-show_streams', '-select_streams', 'a', '-loglevel', 'error'],
+            capture_output=True,
+            text=True
+        )
+        return "codec_type=audio" in result.stdout
+    except Exception as e:
+        logger.error(f"Error checking audio: {str(e)}")
+        return False
+
+def download_media(url):
+    """Universal downloader for all supported platforms"""
+    try:
+        temp_dir = tempfile.mkdtemp()
         
-        # Add cookies for YouTube if available
-        if ('youtube.com' in url or 'youtu.be' in url) and os.path.exists(COOKIES_FILE):
-            ydl_opts['cookiefile'] = COOKIES_FILE
-            logger.info("Using cookies.txt for YouTube download")
-        
-        if audio_only:
-            ydl_opts['format'] = 'bestaudio/best'
-            ydl_opts['postprocessors'].append({
-                'key': 'FFmpegExtractAudio',
-                'preferredcodec': 'mp3',
-                'preferredquality': '192',
-            })
+        # Different options for YouTube (with cookies) vs other platforms
+        if "youtube.com" in url or "youtu.be" in url:
+            ydl_opts = {
+                'format': 'bestvideo+bestaudio/best',
+                'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
+                'cookiefile': COOKIES_FILE,
+                'merge_output_format': 'mp4',
+                'quiet': True,
+                'postprocessors': [
+                    {'key': 'FFmpegVideoConvertor', 'preferedformat': 'mp4'},
+                    {'key': 'FFmpegMetadata'},
+                    {'key': 'EmbedThumbnail'}
+                ],
+            }
+        else:
+            ydl_opts = {
+                'format': 'bestvideo+bestaudio/best',
+                'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
+                'merge_output_format': 'mp4',
+                'quiet': True,
+                'writethumbnail': True,
+                'postprocessors': [
+                    {'key': 'FFmpegMetadata'},
+                    {'key': 'EmbedThumbnail'}
+                ],
+            }
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             filename = ydl.prepare_filename(info)
             
-            if audio_only:
-                filename = filename.replace('.webm', '.mp3').replace('.m4a', '.mp3')
+            # For non-YouTube, we don't need special handling
+            if "youtube.com" not in url and "youtu.be" not in url:
+                return filename, info.get('title', 'video')
             
-            if os.path.exists(filename):
-                return filename, info.get('title', 'media')
-        return None, None
-        
+            # For YouTube, check audio and handle if missing
+            if check_audio(filename):
+                return filename, info.get('title', 'video')
+            
+            # Handle YouTube audio missing case
+            logger.warning("Audio missing - forcing separate audio/video download...")
+            video_format = "bestvideo[ext=mp4]"
+            video_path = os.path.join(temp_dir, "video.mp4")
+            subprocess.run([
+                "yt-dlp",
+                "-f", video_format,
+                "-o", video_path,
+                url,
+                "--cookies", COOKIES_FILE,
+                "--quiet"
+            ], check=True)
+            
+            audio_path = os.path.join(temp_dir, "audio.m4a")
+            subprocess.run([
+                "yt-dlp",
+                "-f", "bestaudio[ext=m4a]",
+                "-o", audio_path,
+                url,
+                "--cookies", COOKIES_FILE,
+                "--quiet"
+            ], check=True)
+            
+            final_path = os.path.join(temp_dir, "final.mp4")
+            subprocess.run([
+                "ffmpeg",
+                "-i", video_path,
+                "-i", audio_path,
+                "-c:v", "copy",
+                "-c:a", "aac",
+                "-strict", "experimental",
+                final_path,
+                "-y",
+                "-loglevel", "error"
+            ], check=True)
+            
+            if os.path.exists(video_path):
+                os.remove(video_path)
+            if os.path.exists(audio_path):
+                os.remove(audio_path)
+                
+            return final_path, info.get('title', 'video')
+            
     except Exception as e:
-        logger.error(f"Error downloading media: {str(e)}")
+        logger.error(f"Error downloading video: {str(e)}")
         return None, None
     finally:
         # Clean up temp directory if empty
         try:
             if os.path.exists(temp_dir) and not os.listdir(temp_dir):
                 os.rmdir(temp_dir)
-        except:
-            pass
-
-def send_format_options(sender, url):
-    """Send available format options to user"""
-    formats_info = get_available_formats(url)
-    if not formats_info:
-        send_whatsapp_message("❌ Could not get available formats for this URL")
-        return False
-    
-    user_sessions[sender] = {
-        'url': url,
-        'title': formats_info['title'],
-        'awaiting_format': True
-    }
-    
-    options_text = f"📺 Available formats for: {formats_info['title']}\n\n"
-    
-    # Video options
-    if formats_info['video_formats']:
-        options_text += "🎥 Video Formats:\n"
-        for i, fmt in enumerate(formats_info['video_formats'][:5]):  # Show top 5 video formats
-            res = fmt.get('height', '?')
-            fps = fmt.get('fps', 0)
-            options_text += f"{i+1}. {res}p{f' ({fps}fps)' if fps > 30 else ''}\n"
-    
-    # Audio options
-    if formats_info['audio_formats']:
-        options_text += "\n🎵 Audio Formats:\n"
-        audio_start = len(formats_info['video_formats'][:5]) + 1
-        for i, fmt in enumerate(formats_info['audio_formats'][:3]):  # Show top 3 audio formats
-            abr = fmt.get('abr', 0)
-            options_text += f"{audio_start + i}. MP3 ({abr}kbps)\n"
-    
-    options_text += "\nReply with the number of your choice"
-    send_whatsapp_message(options_text)
-    return True
+        except Exception as e:
+            logger.warning(f"Error cleaning temp dir: {str(e)}")
 
 # ======================
 # WEBHOOK HANDLER
@@ -267,60 +254,17 @@ def handle_webhook():
 
         logger.info(f"PROCESSING MESSAGE FROM {AUTHORIZED_NUMBER}: {message}")
 
-        # Check if this is a format selection
-        if sender in user_sessions and user_sessions[sender].get('awaiting_format'):
-            try:
-                choice = message.strip()
-                url = user_sessions[sender]['url']
-                title = user_sessions[sender]['title']
-                del user_sessions[sender]  # Clear the session
-                
-                formats_info = get_available_formats(url)
-                if not formats_info:
-                    send_whatsapp_message("❌ Could not get formats. Please try again.")
-                    return jsonify({'status': 'processed'})
-                
-                # Determine if audio or video was selected
-                video_count = len(formats_info['video_formats'][:5])
-                audio_only = int(choice) > video_count if choice.isdigit() else False
-                
-                send_whatsapp_message("⬇️ Downloading your media...")
-                
-                if audio_only:
-                    # Audio download
-                    file_path, _ = download_media(url, audio_only=True)
-                    if file_path:
-                        send_whatsapp_file(file_path, f"🎵 {title}", is_video=False)
-                        os.remove(file_path)
-                    else:
-                        send_whatsapp_message("❌ Failed to download audio. Please try again.")
-                else:
-                    # Video download
-                    format_id = formats_info['video_formats'][int(choice)-1]['format_id']
-                    file_path, _ = download_media(url, format_id=format_id)
-                    if file_path:
-                        send_whatsapp_file(file_path, f"🎥 {title}", is_video=True)
-                        os.remove(file_path)
-                    else:
-                        send_whatsapp_message("❌ Failed to download video. Please try again.")
-                
-                return jsonify({'status': 'processed'})
-            except Exception as e:
-                logger.error(f"Error processing format choice: {str(e)}")
-                send_whatsapp_message("❌ Invalid selection. Please try again.")
-                return jsonify({'status': 'processed'})
-
         # Command handling
         if message.lower() in ['hi', 'hello', 'hey']:
             help_text = """👋 Hi! Here's what I can do:
-- Send any video URL to download (YouTube, Instagram, Facebook, etc.)
+Send any video URL to download it
 /thumbnail [prompt] - Generate custom thumbnail
 /help - Show this message"""
             send_whatsapp_message(help_text)
         
         elif message.lower().startswith(('/help', 'help', 'info')):
             help_text = """ℹ️ Available Commands:
-- Just send any video URL to download
+Send any video URL to download it (supports 1000+ sites)
 /thumbnail [prompt] - Generate thumbnail
 /help - Show this message"""
             send_whatsapp_message(help_text)
@@ -343,12 +287,19 @@ def handle_webhook():
                 else:
                     send_whatsapp_message("❌ Failed to generate. Please try different keywords.")
         
-        # URL detection
-        elif re.match(r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+', message):
-            url = message.strip()
-            send_whatsapp_message("🔍 Checking available formats...")
-            if not send_format_options(sender, url):
-                send_whatsapp_message("❌ Unsupported URL or private content")
+        # Check if it's a URL
+        elif any(proto in message.lower() for proto in ['http://', 'https://']):
+            send_whatsapp_message("⬇️ Downloading media... (this may take a while)")
+            file_path, title = download_media(message)
+            if file_path:
+                if file_path.endswith('.mp3'):
+                    send_whatsapp_file(file_path, f"🎵 {title}", is_video=False)
+                else:
+                    send_whatsapp_file(file_path, f"🎥 {title}", is_video=True)
+                os.remove(file_path)
+                os.rmdir(os.path.dirname(file_path))
+            else:
+                send_whatsapp_message("❌ Failed to download media. Please try again or check the URL.")
         
         elif len(message) > 3:  # Fallback to thumbnail generation
             send_whatsapp_message("🔄 Generating your thumbnail... (20-30 seconds)")
