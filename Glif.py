@@ -148,76 +148,115 @@ def send_format_options(sender, url):
             send_whatsapp_message("❌ Failed to download media. Please try again.")
         return
 
-    # Group formats by quality
-    video_formats = []
-    audio_formats = []
-    
-    for f in formats:
-        if f.get('acodec') != 'none' and f.get('vcodec') != 'none':
-            # Video format
-            res = f.get('height', 0)
-            video_formats.append({
-                'id': f['format_id'],
-                'quality': f"{res}p",
+    # Check if this is a YouTube link
+    is_youtube = 'youtube.com' in url or 'youtu.be' in url
+
+    if is_youtube:
+        # Original YouTube quality extraction method
+        format_options = []
+        for f in formats:
+            if f.get('ext') in ['mp4', 'webm']:
+                format_id = f['format_id']
+                resolution = f.get('height', 'unknown')
+                fps = f.get('fps', 0)
+                note = f"{resolution}p{f'@{fps}fps' if fps > 30 else ''}"
+                format_options.append({
+                    'format_id': format_id,
+                    'note': note
+                })
+        
+        # Prepare options text
+        options_text = "📺 Available YouTube Download Options:\n\n"
+        options_list = []
+        
+        for i, fmt in enumerate(format_options, 1):
+            options_text += f"{i}. {fmt['note']}\n"
+            options_list.append({
+                'number': str(i),
+                'id': fmt['format_id'],
                 'type': 'video'
             })
-        elif f.get('acodec') != 'none':
-            # Audio format
-            abr = f.get('abr', 0)
-            audio_formats.append({
-                'id': f['format_id'],
-                'quality': f"{abr}kbps",
+        
+        # Add best quality option
+        best_num = len(options_list) + 1
+        options_text += f"\n{best_num}. Best Available Quality (Auto)\n"
+        options_list.append({
+            'number': str(best_num),
+            'id': None,
+            'type': 'best'
+        })
+        
+    else:
+        # New method for other platforms (Facebook, etc.)
+        video_formats = []
+        audio_formats = []
+        
+        for f in formats:
+            if f.get('acodec') != 'none' and f.get('vcodec') != 'none':
+                # Video format
+                res = f.get('height', 0)
+                video_formats.append({
+                    'id': f['format_id'],
+                    'quality': f"{res}p",
+                    'type': 'video'
+                })
+            elif f.get('acodec') != 'none':
+                # Audio format
+                abr = f.get('abr', 0)
+                audio_formats.append({
+                    'id': f['format_id'],
+                    'quality': f"{abr}kbps",
+                    'type': 'audio'
+                })
+
+        # Remove duplicate qualities
+        seen_video = set()
+        unique_video = []
+        for v in sorted(video_formats, key=lambda x: float(x['quality'].replace('p', '')), reverse=True):
+            if v['quality'] not in seen_video:
+                seen_video.add(v['quality'])
+                unique_video.append(v)
+        
+        seen_audio = set()
+        unique_audio = []
+        for a in sorted(audio_formats, key=lambda x: float(x['quality'].replace('kbps', '')), reverse=True):
+            if a['quality'] not in seen_audio:
+                seen_audio.add(a['quality'])
+                unique_audio.append(a)
+
+        # Prepare options text
+        options_text = "📺 Available Download Options:\n\n"
+        options_list = []
+        
+        # Add video options
+        options_text += "🎥 Video Formats:\n"
+        for i, fmt in enumerate(unique_video, 1):
+            options_text += f"{i}. {fmt['quality']}\n"
+            options_list.append({
+                'number': str(i),
+                'id': fmt['id'],
+                'type': 'video'
+            })
+        
+        # Add audio options
+        options_text += "\n🎧 Audio Formats:\n"
+        audio_start = len(unique_video) + 1
+        for i, fmt in enumerate(unique_audio, audio_start):
+            options_text += f"{i}. {fmt['quality']} (Audio Only)\n"
+            options_list.append({
+                'number': str(i),
+                'id': fmt['id'],
                 'type': 'audio'
             })
-
-    # Remove duplicate qualities
-    seen_video = set()
-    unique_video = []
-    for v in sorted(video_formats, key=lambda x: float(x['quality'].replace('p', '')), reverse=True):
-        if v['quality'] not in seen_video:
-            seen_video.add(v['quality'])
-            unique_video.append(v)
-    
-    seen_audio = set()
-    unique_audio = []
-    for a in sorted(audio_formats, key=lambda x: float(x['quality'].replace('kbps', '')), reverse=True):
-        if a['quality'] not in seen_audio:
-            seen_audio.add(a['quality'])
-            unique_audio.append(a)
-
-    # Prepare options text
-    options_text = "📺 Available Download Options:\n\n"
-    options_list = []
-    
-    # Add video options
-    options_text += "🎥 Video Formats:\n"
-    for i, fmt in enumerate(unique_video, 1):
-        options_text += f"{i}. {fmt['quality']}\n"
+        
+        # Add best quality option
+        best_num = len(options_list) + 1
+        options_text += f"\n{best_num}. Best Available Quality (Auto)\n"
         options_list.append({
-            'number': str(i),
-            'id': fmt['id'],
-            'type': 'video'
+            'number': str(best_num),
+            'id': None,
+            'type': 'best'
         })
-    
-    # Add audio options
-    options_text += "\n🎧 Audio Formats:\n"
-    audio_start = len(unique_video) + 1
-    for i, fmt in enumerate(unique_audio, audio_start):
-        options_text += f"{i}. {fmt['quality']} (Audio Only)\n"
-        options_list.append({
-            'number': str(i),
-            'id': fmt['id'],
-            'type': 'audio'
-        })
-    
-    # Add best quality option
-    best_num = len(options_list) + 1
-    options_text += f"\n{best_num}. Best Available Quality (Auto)\n"
-    options_list.append({
-        'number': str(best_num),
-        'id': None,
-        'type': 'best'
-    })
     
     options_text += "\n🔢 Reply with the number of your choice"
     
