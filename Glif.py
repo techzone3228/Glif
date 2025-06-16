@@ -42,12 +42,12 @@ SUPPORTED_DOMAINS = [
 
 # Resolution mapping
 RESOLUTION_MAP = {
-    '144p': {'format': '160', 'height': 144},
-    '360p': {'format': '18', 'height': 360},
-    '480p': {'format': '135', 'height': 480},
-    '720p': {'format': '22', 'height': 720},
-    '1080p': {'format': 'bestvideo[height<=1080]+bestaudio', 'height': 1080},
-    'best': {'format': 'bestvideo+bestaudio', 'height': float('inf')},
+    '144p': {'format': 'bestvideo[height<=144]+bestaudio/best', 'height': 144},
+    '360p': {'format': 'bestvideo[height<=360]+bestaudio/best', 'height': 360},
+    '480p': {'format': 'bestvideo[height<=480]+bestaudio/best', 'height': 480},
+    '720p': {'format': 'bestvideo[height<=720]+bestaudio/best', 'height': 720},
+    '1080p': {'format': 'bestvideo[height<=1080]+bestaudio/best', 'height': 1080},
+    'best': {'format': 'bestvideo+bestaudio/best', 'height': float('inf')},
     'mp3': {'format': 'bestaudio/best', 'ext': 'mp3'}
 }
 
@@ -143,56 +143,7 @@ def check_audio(filename):
         logger.error(f"Error checking audio: {str(e)}")
         return False
 
-def get_available_resolutions(url):
-    """Check available resolutions for a YouTube video"""
-    try:
-        ydl_opts = {
-            'quiet': True,
-            'no_warnings': True,
-            'extract_flat': False,  # Changed from True to False to get full format info
-            'force_generic_extractor': True,
-            'cookiefile': COOKIES_FILE
-        }
-        
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            if not info or 'formats' not in info:
-                return None
-            
-            available_resolutions = set()
-            max_height = 0
-            
-            for fmt in info['formats']:
-                if fmt.get('vcodec') != 'none':  # Video format
-                    height = fmt.get('height', 0)
-                    if height > max_height:
-                        max_height = height
-                    
-                    if height >= 144:
-                        available_resolutions.add('144p')
-                    if height >= 360:
-                        available_resolutions.add('360p')
-                    if height >= 480:
-                        available_resolutions.add('480p')
-                    if height >= 720:
-                        available_resolutions.add('720p')
-                    if height >= 1080:
-                        available_resolutions.add('1080p')
-            
-            # Add best option if we found any video formats
-            if available_resolutions:
-                available_resolutions.add('best')
-            
-            # Always include MP3 option
-            available_resolutions.add('mp3')
-            
-            # Sort resolutions in order
-            resolution_order = ['144p', '360p', '480p', '720p', '1080p', 'best', 'mp3']
-            return [res for res in resolution_order if res in available_resolutions]
-            
-    except Exception as e:
-        logger.error(f"Error checking available resolutions: {str(e)}")
-        return None
+
 
 def download_media(url, resolution):
     """Download YouTube media with selected resolution"""
@@ -201,41 +152,73 @@ def download_media(url, resolution):
     
     format_spec = RESOLUTION_MAP[resolution]['format']
     
-    # Handle MP3 download
-    if resolution == 'mp3':
-        try:
-            temp_dir = tempfile.mkdtemp()
-            ydl_opts = {
-                'format': format_spec,
-                'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
-                'postprocessors': [{
-                    'key': 'FFmpegExtractAudio',
-                    'preferredcodec': 'mp3',
-                    'preferredquality': '192',
-                }],
-                'cookiefile': COOKIES_FILE,
-                'quiet': True
-            }
-            
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+    try:
+        temp_dir = tempfile.mkdtemp()
+        ydl_opts = {
+            'format': format_spec,
+            'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
+            'cookiefile': COOKIES_FILE,
+            'merge_output_format': 'mp4',
+            'postprocessors': [
+                {'key': 'FFmpegVideoConvertor', 'preferedformat': 'mp4'},
+                {'key': 'FFmpegMetadata'},
+                {'key': 'EmbedThumbnail'}
+            ],
+            'quiet': True,
+            'retries': 3,
+            'fragment_retries': 3,
+            'skip_unavailable_fragments': True
+        }
+        
+        # Special handling for audio only
+        if resolution == 'mp3':
+            ydl_opts['format'] = 'bestaudio/best'
+            ydl_opts['postprocessors'] = [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }]
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            try:
                 info = ydl.extract_info(url, download=True)
                 filename = ydl.prepare_filename(info)
-                mp3_file = filename.replace('.webm', '.mp3').replace('.m4a', '.mp3')
                 
-                if os.path.exists(mp3_file):
-                    return mp3_file, info.get('title', 'audio')
-            return None, None
-            
+                if resolution == 'mp3':
+                    mp3_file = filename.replace('.webm', '.mp3').replace('.m4a', '.mp3')
+                    if os.path.exists(mp3_file):
+                        return mp3_file, info.get('title', 'audio')
+                else:
+                    if check_audio(filename):
+                        new_filename = f"{os.path.splitext(filename)[0]}_{resolution}.mp4"
+                        os.rename(filename, new_filename)
+                        return new_filename, info.get('title', 'video')
+                        
+            except yt_dlp.utils.DownloadError as e:
+                if "Requested format is not available" in str(e):
+                    logger.warning(f"Format {resolution} not available, trying best quality")
+                    ydl_opts['format'] = 'bestvideo[height<={}]'.format(
+                        RESOLUTION_MAP[resolution]['height']
+                    )
+                    info = ydl.extract_info(url, download=True)
+                    filename = ydl.prepare_filename(info)
+                    if check_audio(filename):
+                        new_filename = f"{os.path.splitext(filename)[0]}_{resolution}.mp4"
+                        os.rename(filename, new_filename)
+                        return new_filename, info.get('title', 'video')
+                raise
+                
+        return None, None
+        
+    except Exception as e:
+        logger.error(f"Error downloading video: {str(e)}")
+        return None, None
+    finally:
+        try:
+            if os.path.exists(temp_dir) and not os.listdir(temp_dir):
+                os.rmdir(temp_dir)
         except Exception as e:
-            logger.error(f"Error downloading MP3: {str(e)}")
-            return None, None
-        finally:
-            # Clean up temp directory if empty
-            try:
-                if os.path.exists(temp_dir) and not os.listdir(temp_dir):
-                    os.rmdir(temp_dir)
-            except Exception as e:
-                logger.warning(f"Error cleaning temp dir: {str(e)}")
+            logger.warning(f"Error cleaning temp dir: {str(e)}")
     
     # Handle video downloads
     try:
