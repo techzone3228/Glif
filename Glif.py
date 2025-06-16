@@ -33,23 +33,6 @@ GLIF_TOKENS = [
     "glif_b31fdc2c9a7aaac0ec69d5f59bf05ccea0c5786990ef06b79a1d7db8e37ba317"
 ]
 
-# Supported domains for downloader
-SUPPORTED_DOMAINS = {
-    'youtube': ['youtube.com', 'youtu.be'],
-    'facebook': ['facebook.com', 'fb.watch']
-}
-
-# Resolution mapping with improved format selection
-RESOLUTION_MAP = {
-    '144p': {'format': 'bestvideo[height<=144]+bestaudio/best', 'height': 144},
-    '360p': {'format': 'bestvideo[height<=360]+bestaudio/best', 'height': 360},
-    '480p': {'format': 'bestvideo[height<=480]+bestaudio/best', 'height': 480},
-    '720p': {'format': 'bestvideo[height<=720]+bestaudio/best', 'height': 720},
-    '1080p': {'format': 'bestvideo[height<=1080]+bestaudio/best', 'height': 1080},
-    'best': {'format': 'bestvideo+bestaudio/best', 'height': float('inf')},
-    'mp3': {'format': 'bestaudio/best', 'ext': 'mp3'}
-}
-
 # User session data
 user_sessions = {}
 
@@ -142,7 +125,7 @@ def check_audio(filename):
         logger.error(f"Error checking audio: {str(e)}")
         return False
 
-def get_available_resolutions(url, platform):
+def get_available_resolutions(url):
     """Check available resolutions for a video"""
     try:
         ydl_opts = {
@@ -150,7 +133,7 @@ def get_available_resolutions(url, platform):
             'no_warnings': True,
             'extract_flat': False,
             'force_generic_extractor': True,
-            'cookiefile': COOKIES_FILE if platform == 'youtube' else None
+            'cookiefile': COOKIES_FILE
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -190,18 +173,34 @@ def get_available_resolutions(url, platform):
         logger.error(f"Error checking available resolutions: {str(e)}")
         return ['144p', '360p', '480p', '720p', '1080p', 'best', 'mp3']  # Fallback options
 
-def download_media(url, resolution, platform='youtube'):
+def download_media(url, resolution):
     """Download media with selected resolution"""
-    if resolution not in RESOLUTION_MAP:
-        return None, None
-    
-    format_spec = RESOLUTION_MAP[resolution]['format']
-    
     try:
         temp_dir = tempfile.mkdtemp()
+        
+        # YouTube-specific format selection
+        if 'youtube.com' in url or 'youtu.be' in url:
+            resolution_map = {
+                '144p': 'bestvideo[height<=144]+bestaudio/best',
+                '360p': 'bestvideo[height<=360]+bestaudio/best',
+                '480p': 'bestvideo[height<=480]+bestaudio/best',
+                '720p': 'bestvideo[height<=720]+bestaudio/best',
+                '1080p': 'bestvideo[height<=1080]+bestaudio/best',
+                'best': 'bestvideo+bestaudio/best',
+                'mp3': 'bestaudio/best'
+            }
+            format_spec = resolution_map.get(resolution, 'best')
+        else:
+            # Generic format selection for other platforms
+            if resolution == 'mp3':
+                format_spec = 'bestaudio/best'
+            else:
+                format_spec = 'bestvideo+bestaudio/best'
+        
         ydl_opts = {
             'format': format_spec,
             'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
+            'cookiefile': COOKIES_FILE,
             'merge_output_format': 'mp4',
             'postprocessors': [
                 {'key': 'FFmpegVideoConvertor', 'preferedformat': 'mp4'},
@@ -214,13 +213,8 @@ def download_media(url, resolution, platform='youtube'):
             'skip_unavailable_fragments': True
         }
         
-        # Add cookies for YouTube if available
-        if platform == 'youtube' and os.path.exists(COOKIES_FILE):
-            ydl_opts['cookiefile'] = COOKIES_FILE
-        
         # Special handling for audio only
         if resolution == 'mp3':
-            ydl_opts['format'] = 'bestaudio/best'
             ydl_opts['postprocessors'] = [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
@@ -228,33 +222,18 @@ def download_media(url, resolution, platform='youtube'):
             }]
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            try:
-                info = ydl.extract_info(url, download=True)
-                filename = ydl.prepare_filename(info)
-                
-                if resolution == 'mp3':
-                    mp3_file = filename.replace('.webm', '.mp3').replace('.m4a', '.mp3')
-                    if os.path.exists(mp3_file):
-                        return mp3_file, info.get('title', 'audio')
-                else:
-                    if check_audio(filename):
-                        new_filename = f"{os.path.splitext(filename)[0]}_{resolution}.mp4"
-                        os.rename(filename, new_filename)
-                        return new_filename, info.get('title', 'video')
-                        
-            except yt_dlp.utils.DownloadError as e:
-                if "Requested format is not available" in str(e):
-                    logger.warning(f"Format {resolution} not available, trying best quality")
-                    ydl_opts['format'] = 'bestvideo[height<={}]+bestaudio/best'.format(
-                        RESOLUTION_MAP[resolution]['height']
-                    )
-                    info = ydl.extract_info(url, download=True)
-                    filename = ydl.prepare_filename(info)
-                    if check_audio(filename):
-                        new_filename = f"{os.path.splitext(filename)[0]}_{resolution}.mp4"
-                        os.rename(filename, new_filename)
-                        return new_filename, info.get('title', 'video')
-                raise
+            info = ydl.extract_info(url, download=True)
+            filename = ydl.prepare_filename(info)
+            
+            if resolution == 'mp3':
+                mp3_file = filename.replace('.webm', '.mp3').replace('.m4a', '.mp3')
+                if os.path.exists(mp3_file):
+                    return mp3_file, info.get('title', 'audio')
+            else:
+                if check_audio(filename):
+                    new_filename = f"{os.path.splitext(filename)[0]}_{resolution}.mp4"
+                    os.rename(filename, new_filename)
+                    return new_filename, info.get('title', 'video')
                 
         return None, None
         
@@ -268,11 +247,11 @@ def download_media(url, resolution, platform='youtube'):
         except Exception as e:
             logger.warning(f"Error cleaning temp dir: {str(e)}")
 
-def send_resolution_options(sender, url, platform):
+def send_resolution_options(sender, url):
     """Check available resolutions and send options to user"""
     send_whatsapp_message("🔍 Checking available video qualities...")
     
-    resolutions = get_available_resolutions(url, platform)
+    resolutions = get_available_resolutions(url)
     if not resolutions:
         send_whatsapp_message("❌ Could not determine available qualities. Trying default options...")
         resolutions = ['144p', '360p', '480p', '720p', '1080p', 'best', 'mp3']
@@ -281,8 +260,7 @@ def send_resolution_options(sender, url, platform):
     user_sessions[sender] = {
         'url': url,
         'available_resolutions': resolutions,
-        'awaiting_resolution': True,
-        'platform': platform
+        'awaiting_resolution': True
     }
     
     # Build options message
@@ -349,12 +327,11 @@ def handle_webhook():
                 if choice in resolution_map:
                     resolution = resolution_map[choice]
                     url = user_sessions[sender]['url']
-                    platform = user_sessions[sender].get('platform', 'youtube')
                     del user_sessions[sender]  # Clear the session
                     
                     if resolution == 'mp3':
                         send_whatsapp_message("⬇️ Downloading MP3 audio...")
-                        file_path, title = download_media(url, resolution, platform)
+                        file_path, title = download_media(url, resolution)
                         if file_path:
                             send_whatsapp_file(file_path, f"🎵 {title}", is_video=False)
                             os.remove(file_path)
@@ -363,7 +340,7 @@ def handle_webhook():
                             send_whatsapp_message("❌ Failed to download audio. Please try again.")
                     else:
                         send_whatsapp_message(f"⬇️ Downloading {resolution} quality...")
-                        file_path, title = download_media(url, resolution, platform)
+                        file_path, title = download_media(url, resolution)
                         if file_path:
                             send_whatsapp_file(file_path, f"🎥 {title}\nQuality: {resolution}", is_video=True)
                             os.remove(file_path)
@@ -374,8 +351,7 @@ def handle_webhook():
                     send_whatsapp_message("❌ Invalid choice. Please select one of the available options.")
                     # Resend options
                     url = user_sessions[sender]['url']
-                    platform = user_sessions[sender].get('platform', 'youtube')
-                    send_resolution_options(sender, url, platform)
+                    send_resolution_options(sender, url)
                 return jsonify({'status': 'processed'})
             except Exception as e:
                 logger.error(f"Error processing resolution choice: {str(e)}")
@@ -385,16 +361,14 @@ def handle_webhook():
         # Command handling
         if message.lower() in ['hi', 'hello', 'hey']:
             help_text = """👋 Hi! Here's what I can do:
-/yt [YouTube URL] - Download YouTube video/audio
-/fb [Facebook URL] - Download Facebook video
+Paste any video URL (YouTube, Instagram, TikTok, etc.) to download
 /glif [prompt] - Generate custom thumbnail
 /help - Show this message"""
             send_whatsapp_message(help_text)
         
         elif message.lower().startswith(('/help', 'help', 'info')):
             help_text = """ℹ️ Available Commands:
-/yt [URL] - Download YouTube video/audio (choose quality)
-/fb [URL] - Download Facebook video (choose quality)
+Paste any video URL (YouTube, Instagram, TikTok, etc.) to download
 /glif [prompt] - Generate thumbnail
 /help - Show this message"""
             send_whatsapp_message(help_text)
@@ -417,21 +391,9 @@ def handle_webhook():
                 else:
                     send_whatsapp_message("❌ Failed to generate. Please try different keywords.")
         
-        elif message.lower().startswith('/yt '):
-            url = message[4:].strip()
-            if any(domain in url for domain in SUPPORTED_DOMAINS['youtube']):
-                # Check available resolutions and send options
-                send_resolution_options(sender, url, 'youtube')
-            else:
-                send_whatsapp_message("⚠️ Please provide a valid YouTube URL")
-        
-        elif message.lower().startswith('/fb '):
-            url = message[4:].strip()
-            if any(domain in url for domain in SUPPORTED_DOMAINS['facebook']):
-                # Check available resolutions and send options
-                send_resolution_options(sender, url, 'facebook')
-            else:
-                send_whatsapp_message("⚠️ Please provide a valid Facebook URL")
+        # Check if message is a URL
+        elif any(domain in message.lower() for domain in ['http://', 'https://', 'youtube.com', 'youtu.be', 'instagram.com', 'tiktok.com', 'twitter.com', 'fb.com', 'facebook.com']):
+            send_resolution_options(sender, message)
 
         return jsonify({'status': 'processed'})
 
