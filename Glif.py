@@ -22,15 +22,15 @@ GREEN_API = {
 AUTHORIZED_NUMBER = "923401809397"
 COOKIES_FILE = "cookies.txt"
 
-# Fallback resolution options when format detection fails
-FALLBACK_RESOLUTIONS = {
+# Resolution options (numbered)
+RESOLUTION_OPTIONS = {
     '1': {'name': '144p', 'format': '160'},
     '2': {'name': '360p', 'format': '18'},
     '3': {'name': '480p', 'format': '135'},
     '4': {'name': '720p', 'format': '22'},
     '5': {'name': '1080p', 'format': 'bestvideo[height<=1080]+bestaudio'},
-    '6': {'name': 'Best', 'format': 'bestvideo+bestaudio'},
-    '7': {'name': 'MP3', 'format': 'bestaudio/best', 'ext': 'mp3'}
+    '6': {'name': 'Best Quality', 'format': 'bestvideo+bestaudio'},
+    '7': {'name': 'MP3 Audio', 'format': 'bestaudio/best', 'ext': 'mp3'}
 }
 
 # User session data
@@ -90,26 +90,18 @@ def send_whatsapp_file(file_path, caption, is_video=False):
         logger.error(f"File upload failed: {str(e)}")
         return False
 
-def get_available_formats(url):
-    """Get available formats for the media"""
-    try:
-        ydl_opts = {'quiet': True}
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            formats = info.get('formats', [])
-            return formats
-    except Exception as e:
-        logger.error(f"Error getting formats: {str(e)}")
-        return None
+def is_youtube_url(url):
+    """Check if URL is from YouTube"""
+    return any(domain in url.lower() for domain in ['youtube.com', 'youtu.be'])
 
-def download_media(url, format_id=None):
-    """Download media with selected format"""
+def download_media(url, choice=None):
+    """Download media with selected option"""
     try:
         temp_dir = tempfile.mkdtemp()
         ydl_opts = {
             'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
-            'quiet': False,
-            'no_warnings': False,
+            'quiet': True,
+            'no_warnings': True,
             'writethumbnail': True,
             'postprocessors': [
                 {'key': 'FFmpegMetadata'},
@@ -117,10 +109,23 @@ def download_media(url, format_id=None):
             ],
         }
 
-        if format_id:
-            ydl_opts['format'] = format_id
+        # Use cookies for YouTube if available
+        if is_youtube_url(url) and os.path.exists(COOKIES_FILE):
+            ydl_opts['cookiefile'] = COOKIES_FILE
+            logger.info("Using cookies.txt for YouTube download")
+
+        # Handle MP3 download
+        if choice == '7':
+            ydl_opts['format'] = 'bestaudio/best'
+            ydl_opts['postprocessors'].append({
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            })
         else:
-            ydl_opts['format'] = 'bestvideo+bestaudio/best'
+            # Use selected resolution or best quality by default
+            format_str = RESOLUTION_OPTIONS.get(choice, {}).get('format', 'bestvideo+bestaudio')
+            ydl_opts['format'] = format_str
             ydl_opts['merge_output_format'] = 'mp4'
 
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -143,69 +148,18 @@ def download_media(url, format_id=None):
         # Clean up other files in temp directory except the downloaded file
         pass
 
-def send_fallback_options(sender, url):
-    """Send fallback resolution options when format detection fails"""
-    options_text = "📺 Default Download Options (automatic detection failed):\n\n"
-    for key, res in FALLBACK_RESOLUTIONS.items():
-        options_text += f"{key}. {res['name']}\n"
+def send_resolution_options(sender, url):
+    """Send resolution options to user"""
+    options_text = "📺 Please select download option:\n\n"
+    for num, res in RESOLUTION_OPTIONS.items():
+        options_text += f"{num}. {res['name']}\n"
     
-    options_text += "\n🔢 Reply with the number (1-7) of your choice"
-    
-    # Store the URL in user session
-    user_sessions[sender] = {
-        'url': url,
-        'awaiting_fallback': True
-    }
-    
-    send_whatsapp_message(options_text)
-
-def send_format_options(sender, url):
-    """Send available format options to user"""
-    formats = get_available_formats(url)
-    
-    if formats is None:  # Error occurred during format detection
-        send_whatsapp_message("⚠️ Could not detect formats. Using fallback options...")
-        send_fallback_options(sender, url)
-        return
-
-    if not formats:  # No formats found
-        send_whatsapp_message("⚠️ No formats found. Using fallback options...")
-        send_fallback_options(sender, url)
-        return
-
-    # Group formats by quality
-    video_formats = {}
-    audio_formats = {}
-    
-    for f in formats:
-        if f.get('acodec') != 'none' and f.get('vcodec') != 'none':
-            # Video format
-            res = f.get('height', 0)
-            if res not in video_formats:
-                video_formats[res] = f['format_id']
-        elif f.get('acodec') != 'none':
-            # Audio format
-            abr = f.get('abr', 0)
-            if abr not in audio_formats:
-                audio_formats[abr] = f['format_id']
-
-    # Prepare options text
-    options_text = "📺 Available Download Options:\n\n"
-    options_text += "🎥 Video Formats:\n"
-    for res, fmt_id in sorted(video_formats.items(), reverse=True):
-        options_text += f"- {res}p (ID: {fmt_id})\n"
-    
-    options_text += "\n🎧 Audio Formats:\n"
-    for abr, fmt_id in sorted(audio_formats.items(), reverse=True):
-        options_text += f"- {abr}kbps (ID: {fmt_id})\n"
-    
-    options_text += "\n🔢 Reply with the format ID of your choice"
-    options_text += "\n⚡ Or reply 'best' for automatic best quality"
+    options_text += "\nReply with the number (1-7) of your choice"
     
     # Store the URL in user session
     user_sessions[sender] = {
         'url': url,
-        'awaiting_format': True
+        'awaiting_resolution': True
     }
     
     send_whatsapp_message(options_text)
@@ -241,70 +195,40 @@ def handle_webhook():
 
         logger.info(f"PROCESSING MESSAGE FROM {AUTHORIZED_NUMBER}: {message}")
 
-        # Check if this is a format selection
-        if sender in user_sessions and user_sessions[sender].get('awaiting_format'):
-            url = user_sessions[sender]['url']
-            del user_sessions[sender]  # Clear the session
-            
-            if message.lower() == 'best':
-                format_id = None
-                send_whatsapp_message("⬇️ Downloading best quality...")
-            else:
-                format_id = message.strip()
-                send_whatsapp_message(f"⬇️ Downloading format {format_id}...")
-            
-            file_path, title = download_media(url, format_id)
-            if file_path:
-                is_video = file_path.endswith(('.mp4', '.mkv', '.webm'))
-                send_whatsapp_file(file_path, f"📦 {title}", is_video=is_video)
-                os.remove(file_path)
-                os.rmdir(os.path.dirname(file_path))
-            else:
-                send_whatsapp_message("❌ Failed to download media. Please try again.")
-            return jsonify({'status': 'processed'})
-
-        # Check if this is a fallback resolution selection
-        if sender in user_sessions and user_sessions[sender].get('awaiting_fallback'):
+        # Check if this is a resolution selection
+        if sender in user_sessions and user_sessions[sender].get('awaiting_resolution'):
             url = user_sessions[sender]['url']
             choice = message.strip()
             del user_sessions[sender]  # Clear the session
             
-            if choice in FALLBACK_RESOLUTIONS:
-                resolution = FALLBACK_RESOLUTIONS[choice]
-                send_whatsapp_message(f"⬇️ Downloading {resolution['name']} quality...")
+            if choice in RESOLUTION_OPTIONS:
+                resolution = RESOLUTION_OPTIONS[choice]
+                send_whatsapp_message(f"⬇️ Downloading {resolution['name']}...")
                 
-                if choice == '7':  # MP3 option
-                    file_path, title = download_media(url, resolution['format'])
-                    if file_path:
-                        send_whatsapp_file(file_path, f"🎵 {title}", is_video=False)
-                        os.remove(file_path)
-                        os.rmdir(os.path.dirname(file_path))
-                    else:
-                        send_whatsapp_message("❌ Failed to download audio. Please try again.")
+                file_path, title = download_media(url, choice)
+                if file_path:
+                    is_video = not file_path.endswith('.mp3')
+                    send_whatsapp_file(file_path, f"🎥 {title}" if is_video else f"🎵 {title}", is_video=is_video)
+                    os.remove(file_path)
+                    os.rmdir(os.path.dirname(file_path))
                 else:
-                    file_path, title = download_media(url, resolution['format'])
-                    if file_path:
-                        send_whatsapp_file(file_path, f"🎥 {title}\nQuality: {resolution['name']}", is_video=True)
-                        os.remove(file_path)
-                        os.rmdir(os.path.dirname(file_path))
-                    else:
-                        send_whatsapp_message("❌ Failed to download media. Please try again.")
+                    send_whatsapp_message("❌ Failed to download. Please try again.")
             else:
-                send_whatsapp_message("❌ Invalid choice. Please try again.")
+                send_whatsapp_message("❌ Invalid choice. Please select 1-7.")
             return jsonify({'status': 'processed'})
 
         # Check if message contains a URL
         if any(proto in message.lower() for proto in ['http://', 'https://']):
-            send_whatsapp_message("🔍 Analyzing URL...")
-            send_format_options(sender, message)
+            send_whatsapp_message("🔍 URL detected. Preparing download options...")
+            send_resolution_options(sender, message)
             return jsonify({'status': 'processed'})
 
         # Command handling
         if message.lower() in ['hi', 'hello', 'hey']:
             help_text = """👋 Hi! Here's what I can do:
 - Send any video URL to download
-- I support 1000+ sites including YouTube, Instagram, Twitter, etc.
-- I'll show you available quality options"""
+- I support YouTube, Instagram, Twitter, TikTok, and 1000+ sites
+- Just send the link and choose quality"""
             send_whatsapp_message(help_text)
             return jsonify({'status': 'processed'})
         
