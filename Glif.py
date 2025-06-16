@@ -15,8 +15,8 @@ app = Flask(__name__)
 # CONFIGURATION
 # ======================
 GREEN_API = {
-    "idInstance": "7105258364",
-    "apiToken": "9f9e1a1a2611446baed68fd648dba823d34e655958e54b28bb",
+    "idInstance": "7105261536",
+    "apiToken": "13a4bbfd70394a1c862c5d709671333fb1717111737a4f7998",
     "apiUrl": "https://7105.api.greenapi.com",
     "mediaUrl": "https://7105.media.greenapi.com"
 }
