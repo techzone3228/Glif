@@ -6,7 +6,6 @@ from datetime import datetime
 import yt_dlp
 import os
 import tempfile
-import re
 import subprocess
 
 app = Flask(__name__)
@@ -40,7 +39,7 @@ SUPPORTED_DOMAINS = [
     "youtu.be"
 ]
 
-# Resolution mapping
+# Resolution mapping with improved format selection
 RESOLUTION_MAP = {
     '144p': {'format': 'bestvideo[height<=144]+bestaudio/best', 'height': 144},
     '360p': {'format': 'bestvideo[height<=360]+bestaudio/best', 'height': 360},
@@ -143,7 +142,53 @@ def check_audio(filename):
         logger.error(f"Error checking audio: {str(e)}")
         return False
 
-
+def get_available_resolutions(url):
+    """Check available resolutions for a YouTube video"""
+    try:
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': False,
+            'force_generic_extractor': True,
+            'cookiefile': COOKIES_FILE
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            if not info or 'formats' not in info:
+                return None
+            
+            # Get all available formats
+            formats = info.get('formats', [])
+            
+            # Extract unique heights
+            heights = sorted({f.get('height', 0) for f in formats if f.get('vcodec') != 'none'})
+            
+            # Map to standard resolutions
+            available = set()
+            for h in heights:
+                if h >= 1080:
+                    available.add('1080p')
+                if h >= 720:
+                    available.add('720p')
+                if h >= 480:
+                    available.add('480p')
+                if h >= 360:
+                    available.add('360p')
+                if h >= 144:
+                    available.add('144p')
+            
+            # Always include best and mp3 options
+            available.add('best')
+            available.add('mp3')
+            
+            # Return in standard order
+            resolution_order = ['144p', '360p', '480p', '720p', '1080p', 'best', 'mp3']
+            return [res for res in resolution_order if res in available]
+            
+    except Exception as e:
+        logger.error(f"Error checking available resolutions: {str(e)}")
+        return ['144p', '360p', '480p', '720p', '1080p', 'best', 'mp3']  # Fallback options
 
 def download_media(url, resolution):
     """Download YouTube media with selected resolution"""
@@ -197,7 +242,7 @@ def download_media(url, resolution):
             except yt_dlp.utils.DownloadError as e:
                 if "Requested format is not available" in str(e):
                     logger.warning(f"Format {resolution} not available, trying best quality")
-                    ydl_opts['format'] = 'bestvideo[height<={}]'.format(
+                    ydl_opts['format'] = 'bestvideo[height<={}]+bestaudio/best'.format(
                         RESOLUTION_MAP[resolution]['height']
                     )
                     info = ydl.extract_info(url, download=True)
@@ -214,95 +259,6 @@ def download_media(url, resolution):
         logger.error(f"Error downloading video: {str(e)}")
         return None, None
     finally:
-        try:
-            if os.path.exists(temp_dir) and not os.listdir(temp_dir):
-                os.rmdir(temp_dir)
-        except Exception as e:
-            logger.warning(f"Error cleaning temp dir: {str(e)}")
-    
-    # Handle video downloads
-    try:
-        temp_dir = tempfile.mkdtemp()
-        
-        # First try normal download
-        ydl_opts = {
-            'format': format_spec,
-            'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
-            'cookiefile': COOKIES_FILE,
-            'merge_output_format': 'mp4',
-            'postprocessors': [
-                {'key': 'FFmpegVideoConvertor', 'preferedformat': 'mp4'},
-                {'key': 'FFmpegMetadata'},
-                {'key': 'EmbedThumbnail'}
-            ],
-            'quiet': True
-        }
-        
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(info)
-            
-            if check_audio(filename):
-                new_filename = f"{os.path.splitext(filename)[0]}_{resolution}.mp4"
-                os.rename(filename, new_filename)
-                return new_filename, info.get('title', 'video')
-        
-        # If no audio, force separate download and merge
-        logger.warning("Audio missing - forcing separate audio/video download...")
-        
-        # Download video only
-        video_format = "bestvideo[ext=mp4]"
-        if resolution != 'best' and resolution[:-1].isdigit():
-            video_format += f"[height<={resolution[:-1]}]"
-            
-        video_path = os.path.join(temp_dir, "video.mp4")
-        subprocess.run([
-            "yt-dlp",
-            "-f", video_format,
-            "-o", video_path,
-            url,
-            "--cookies", COOKIES_FILE,
-            "--quiet"
-        ], check=True)
-        
-        # Download audio only
-        audio_path = os.path.join(temp_dir, "audio.m4a")
-        subprocess.run([
-            "yt-dlp",
-            "-f", "bestaudio[ext=m4a]",
-            "-o", audio_path,
-            url,
-            "--cookies", COOKIES_FILE,
-            "--quiet"
-        ], check=True)
-        
-        # Merge them
-        final_path = os.path.join(temp_dir, "final.mp4")
-        subprocess.run([
-            "ffmpeg",
-            "-i", video_path,
-            "-i", audio_path,
-            "-c:v", "copy",
-            "-c:a", "aac",
-            "-strict", "experimental",
-            final_path,
-            "-y",
-            "-loglevel", "error"
-        ], check=True)
-        
-        # Clean up
-        if os.path.exists(video_path):
-            os.remove(video_path)
-        if os.path.exists(audio_path):
-            os.remove(audio_path)
-            
-        return final_path, info.get('title', 'video')
-            
-    except Exception as e:
-        logger.error(f"Error downloading video: {str(e)}")
-        return None, None
-    finally:
-        # Clean up temp directory if empty
         try:
             if os.path.exists(temp_dir) and not os.listdir(temp_dir):
                 os.rmdir(temp_dir)
