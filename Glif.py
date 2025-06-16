@@ -37,10 +37,7 @@ GLIF_TOKENS = [
 # Supported domains for downloader
 SUPPORTED_DOMAINS = [
     "youtube.com",
-    "youtu.be",
-    "tiktok.com",
-    "twitter.com",
-    "x.com"
+    "youtu.be"
 ]
 
 # Resolution options with guaranteed audio
@@ -360,23 +357,19 @@ def handle_webhook():
         if message.lower() in ['hi', 'hello', 'hey']:
             help_text = """👋 Hi! Here's what I can do:
 /yt [YouTube URL] - Download YouTube video/audio
-/tt [TikTok URL] - Download TikTok video
-/tw [Twitter URL] - Download Twitter video
-/thumbnail [prompt] - Generate custom thumbnail
+/glif [prompt] - Generate custom thumbnail
 /help - Show this message"""
             send_whatsapp_message(help_text)
         
         elif message.lower().startswith(('/help', 'help', 'info')):
             help_text = """ℹ️ Available Commands:
 /yt [URL] - Download YouTube video/audio (choose quality)
-/tt [URL] - Download TikTok video
-/tw [URL] - Download Twitter video
-/thumbnail [prompt] - Generate thumbnail
+/glif [prompt] - Generate thumbnail
 /help - Show this message"""
             send_whatsapp_message(help_text)
         
-        elif message.lower().startswith('/thumbnail '):
-            prompt = message[11:].strip()
+        elif message.lower().startswith('/glif '):
+            prompt = message[6:].strip()
             if prompt:
                 send_whatsapp_message("🔄 Generating your thumbnail... (20-30 seconds)")
                 result = generate_thumbnail(prompt)
@@ -404,38 +397,6 @@ def handle_webhook():
                 send_resolution_options(sender)
             else:
                 send_whatsapp_message("⚠️ Please provide a valid YouTube URL")
-        
-        elif any(message.lower().startswith(cmd) for cmd in ['/tt ', '/tw ']):
-            command, url = message.split(' ', 1)
-            if any(domain in url for domain in ['tiktok.com', 'twitter.com', 'x.com']):
-                send_whatsapp_message("⬇️ Downloading media... (this may take a while)")
-                file_path, title = download_media(url, '6')  # Use best quality for non-YouTube
-                if file_path:
-                    platform = {
-                        '/tt': 'TikTok',
-                        '/tw': 'Twitter'
-                    }[command]
-                    send_whatsapp_file(file_path, f"🎥 {platform} Video: {title}", is_video=True)
-                    os.remove(file_path)
-                    os.rmdir(os.path.dirname(file_path))
-                else:
-                    send_whatsapp_message("❌ Failed to download media. Please try again or check the URL.")
-            else:
-                send_whatsapp_message("⚠️ Please provide a valid TikTok or Twitter URL")
-        
-        elif len(message) > 3:  # Fallback to thumbnail generation
-            send_whatsapp_message("🔄 Generating your thumbnail... (20-30 seconds)")
-            result = generate_thumbnail(message)
-            if result['status'] == 'success':
-                response = requests.get(result['image_url'])
-                temp_file = os.path.join(tempfile.gettempdir(), "thumbnail.jpg")
-                with open(temp_file, 'wb') as f:
-                    f.write(response.content)
-                send_whatsapp_file(temp_file, f"🎨 Thumbnail for: {message}")
-                send_whatsapp_message(f"🔗 Direct URL: {result['image_url']}")
-                os.remove(temp_file)
-            else:
-                send_whatsapp_message("❌ Failed to generate. Please try different keywords.")
 
         return jsonify({'status': 'processed'})
 
