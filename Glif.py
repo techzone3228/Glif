@@ -149,7 +149,7 @@ def get_available_resolutions(url):
         ydl_opts = {
             'quiet': True,
             'no_warnings': True,
-            'extract_flat': True,
+            'extract_flat': False,  # Changed from True to False to get full format info
             'force_generic_extractor': True,
             'cookiefile': COOKIES_FILE
         }
@@ -168,15 +168,15 @@ def get_available_resolutions(url):
                     if height > max_height:
                         max_height = height
                     
-                    if height == 144:
+                    if height >= 144:
                         available_resolutions.add('144p')
-                    elif height == 360:
+                    if height >= 360:
                         available_resolutions.add('360p')
-                    elif height == 480:
+                    if height >= 480:
                         available_resolutions.add('480p')
-                    elif height == 720:
+                    if height >= 720:
                         available_resolutions.add('720p')
-                    elif height == 1080:
+                    if height >= 1080:
                         available_resolutions.add('1080p')
             
             # Add best option if we found any video formats
@@ -186,12 +186,9 @@ def get_available_resolutions(url):
             # Always include MP3 option
             available_resolutions.add('mp3')
             
-            return sorted(
-                available_resolutions,
-                key=lambda x: float('inf') if x == 'best' else 
-                            float('inf') if x == 'mp3' else 
-                            int(x[:-1])
-            )
+            # Sort resolutions in order
+            resolution_order = ['144p', '360p', '480p', '720p', '1080p', 'best', 'mp3']
+            return [res for res in resolution_order if res in available_resolutions]
             
     except Exception as e:
         logger.error(f"Error checking available resolutions: {str(e)}")
