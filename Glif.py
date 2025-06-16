@@ -21,6 +21,7 @@ GREEN_API = {
 }
 AUTHORIZED_NUMBER = "923401809397"
 COOKIES_FILE = "cookies.txt"
+MAX_MEDIA_SIZE_MB = 100  # WhatsApp media size limit (100MB)
 
 # GLIF Configuration
 GLIF_ID = "cm0zceq2a00023f114o6hti7w"
@@ -67,23 +68,45 @@ def send_whatsapp_message(text):
         logger.error(f"Failed to send message: {str(e)}")
         return False
 
-def send_whatsapp_file(file_path, caption, is_video=False):
-    """Send file (video or image) with caption"""
+def send_whatsapp_file(file_path, caption, as_document=False):
+    """
+    Send file with caption
+    as_document=True sends as document (for files >100MB)
+    """
     try:
+        file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+        if file_size_mb > MAX_MEDIA_SIZE_MB and not as_document:
+            logger.info(f"File too large ({file_size_mb:.2f}MB), sending as document")
+            return send_whatsapp_file(file_path, caption, as_document=True)
+            
         url = f"{GREEN_API['mediaUrl']}/waInstance{GREEN_API['idInstance']}/sendFileByUpload/{GREEN_API['apiToken']}"
+        
+        # Determine content type based on file extension
+        if as_document:
+            content_type = 'application/octet-stream'
+        elif file_path.endswith('.mp4'):
+            content_type = 'video/mp4'
+        elif file_path.endswith('.mp3'):
+            content_type = 'audio/mpeg'
+        else:
+            content_type = 'image/jpeg'
         
         with open(file_path, 'rb') as file:
             files = {
-                'file': (os.path.basename(file_path), file, 'video/mp4' if is_video else 'audio/mpeg' if file_path.endswith('.mp3') else 'image/jpeg')
+                'file': (os.path.basename(file_path), file, content_type)
             }
             data = {
                 'chatId': f"{AUTHORIZED_NUMBER}@c.us",
                 'caption': caption
             }
             
+            if as_document:
+                data['isDocument'] = True
+            
             response = requests.post(url, files=files, data=data)
             response.raise_for_status()
-            logger.info(f"File sent with caption: {caption[:50]}...")
+            
+            logger.info(f"File sent {'as document ' if as_document else ''}with caption: {caption[:50]}...")
             return True
             
     except Exception as e:
@@ -292,10 +315,17 @@ Send any video URL to download it (supports 1000+ sites)
             send_whatsapp_message("⬇️ Downloading media... (this may take a while)")
             file_path, title = download_media(message)
             if file_path:
+                file_size_mb = os.path.getsize(file_path) / (1024 * 1024)
+                
                 if file_path.endswith('.mp3'):
-                    send_whatsapp_file(file_path, f"🎵 {title}", is_video=False)
+                    # For audio files
+                    send_whatsapp_file(file_path, f"🎵 {title}", as_document=(file_size_mb > MAX_MEDIA_SIZE_MB))
                 else:
-                    send_whatsapp_file(file_path, f"🎥 {title}", is_video=True)
+                    # For video files
+                    send_whatsapp_file(file_path, f"🎥 {title}\nSize: {file_size_mb:.2f}MB", 
+                                      as_document=(file_size_mb > MAX_MEDIA_SIZE_MB))
+                
+                # Clean up
                 os.remove(file_path)
                 os.rmdir(os.path.dirname(file_path))
             else:
