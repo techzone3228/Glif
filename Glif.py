@@ -7,6 +7,7 @@ import yt_dlp
 import os
 import tempfile
 import subprocess
+import re
 
 app = Flask(__name__)
 
@@ -125,8 +126,8 @@ def check_audio(filename):
         logger.error(f"Error checking audio: {str(e)}")
         return False
 
-def get_available_resolutions(url):
-    """Check available resolutions for a video"""
+def get_available_qualities(url):
+    """Check available qualities for any video URL"""
     try:
         ydl_opts = {
             'quiet': True,
@@ -144,37 +145,71 @@ def get_available_resolutions(url):
             # Get all available formats
             formats = info.get('formats', [])
             
-            # Extract unique heights
-            heights = sorted({f.get('height', 0) for f in formats if f.get('vcodec') != 'none'})
+            # For YouTube, use standard resolution mapping
+            if 'youtube.com' in url or 'youtu.be' in url:
+                heights = sorted({f.get('height', 0) for f in formats if f.get('vcodec') != 'none'})
+                available = set()
+                for h in heights:
+                    if h >= 1080:
+                        available.add('1080p')
+                    if h >= 720:
+                        available.add('720p')
+                    if h >= 480:
+                        available.add('480p')
+                    if h >= 360:
+                        available.add('360p')
+                    if h >= 144:
+                        available.add('144p')
+                available.add('best')
+                available.add('mp3')
+                resolution_order = ['144p', '360p', '480p', '720p', '1080p', 'best', 'mp3']
+                return [res for res in resolution_order if res in available]
             
-            # Map to standard resolutions
-            available = set()
-            for h in heights:
-                if h >= 1080:
-                    available.add('1080p')
-                if h >= 720:
-                    available.add('720p')
-                if h >= 480:
-                    available.add('480p')
-                if h >= 360:
-                    available.add('360p')
-                if h >= 144:
-                    available.add('144p')
-            
-            # Always include best and mp3 options
-            available.add('best')
-            available.add('mp3')
-            
-            # Return in standard order
-            resolution_order = ['144p', '360p', '480p', '720p', '1080p', 'best', 'mp3']
-            return [res for res in resolution_order if res in available]
+            # For other platforms, detect actual available qualities
+            else:
+                qualities = set()
+                
+                # Check for different quality representations
+                for fmt in formats:
+                    if fmt.get('vcodec') != 'none':  # Video format
+                        if fmt.get('height'):
+                            qualities.add(f"{fmt['height']}p")
+                        elif fmt.get('quality'):
+                            qualities.add(f"{fmt['quality']}")
+                        elif fmt.get('format_note'):
+                            qualities.add(fmt['format_note'])
+                
+                # Standardize quality names
+                standardized = set()
+                for q in qualities:
+                    if isinstance(q, str):
+                        # Clean up quality names
+                        q_clean = re.sub(r'[^0-9p]', '', q.lower())
+                        if 'p' in q_clean:
+                            standardized.add(q_clean)
+                        elif q_clean.isdigit():
+                            standardized.add(f"{q_clean}p")
+                
+                # Add best and mp3 options
+                if standardized:
+                    standardized.add('best')
+                standardized.add('mp3')
+                
+                # Sort by quality (higher first)
+                sorted_qualities = sorted(
+                    standardized,
+                    key=lambda x: int(x.replace('p', '')) if x.replace('p', '').isdigit() else 0,
+                    reverse=True
+                )
+                
+                return sorted_qualities
             
     except Exception as e:
-        logger.error(f"Error checking available resolutions: {str(e)}")
-        return ['144p', '360p', '480p', '720p', '1080p', 'best', 'mp3']  # Fallback options
+        logger.error(f"Error checking available qualities: {str(e)}")
+        return ['best', 'mp3']  # Minimal fallback options
 
-def download_media(url, resolution):
-    """Download media with selected resolution"""
+def download_media(url, quality):
+    """Download media with selected quality"""
     try:
         temp_dir = tempfile.mkdtemp()
         
@@ -189,13 +224,20 @@ def download_media(url, resolution):
                 'best': 'bestvideo+bestaudio/best',
                 'mp3': 'bestaudio/best'
             }
-            format_spec = resolution_map.get(resolution, 'best')
+            format_spec = resolution_map.get(quality, 'best')
         else:
             # Generic format selection for other platforms
-            if resolution == 'mp3':
+            if quality == 'mp3':
                 format_spec = 'bestaudio/best'
-            else:
+            elif quality == 'best':
                 format_spec = 'bestvideo+bestaudio/best'
+            else:
+                # Try to match the exact quality requested
+                height = quality.replace('p', '')
+                if height.isdigit():
+                    format_spec = f'bestvideo[height<={height}]+bestaudio/best'
+                else:
+                    format_spec = f'bestvideo[format_note*={quality}]+bestaudio/best'
         
         ydl_opts = {
             'format': format_spec,
@@ -214,7 +256,7 @@ def download_media(url, resolution):
         }
         
         # Special handling for audio only
-        if resolution == 'mp3':
+        if quality == 'mp3':
             ydl_opts['postprocessors'] = [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
@@ -225,13 +267,13 @@ def download_media(url, resolution):
             info = ydl.extract_info(url, download=True)
             filename = ydl.prepare_filename(info)
             
-            if resolution == 'mp3':
+            if quality == 'mp3':
                 mp3_file = filename.replace('.webm', '.mp3').replace('.m4a', '.mp3')
                 if os.path.exists(mp3_file):
                     return mp3_file, info.get('title', 'audio')
             else:
                 if check_audio(filename):
-                    new_filename = f"{os.path.splitext(filename)[0]}_{resolution}.mp4"
+                    new_filename = f"{os.path.splitext(filename)[0]}_{quality}.mp4"
                     os.rename(filename, new_filename)
                     return new_filename, info.get('title', 'video')
                 
@@ -247,43 +289,43 @@ def download_media(url, resolution):
         except Exception as e:
             logger.warning(f"Error cleaning temp dir: {str(e)}")
 
-def send_resolution_options(sender, url):
-    """Check available resolutions and send options to user"""
+def send_quality_options(sender, url):
+    """Check available qualities and send options to user"""
     send_whatsapp_message("🔍 Checking available video qualities...")
     
-    resolutions = get_available_resolutions(url)
-    if not resolutions:
+    qualities = get_available_qualities(url)
+    if not qualities:
         send_whatsapp_message("❌ Could not determine available qualities. Trying default options...")
-        resolutions = ['144p', '360p', '480p', '720p', '1080p', 'best', 'mp3']
+        qualities = ['best', 'mp3']
     
-    # Store available resolutions in user session
+    # Store available qualities in user session
     user_sessions[sender] = {
         'url': url,
-        'available_resolutions': resolutions,
-        'awaiting_resolution': True
+        'available_qualities': qualities,
+        'awaiting_quality': True
     }
     
     # Build options message
     options_text = "📺 Available download options:\n\n"
     option_number = 1
-    resolution_map = {}
+    quality_map = {}
     
-    for res in resolutions:
-        if res == 'mp3':
+    for qual in qualities:
+        if qual == 'mp3':
             options_text += f"{option_number}. MP3 (Audio only)\n"
-            resolution_map[str(option_number)] = 'mp3'
-        elif res == 'best':
+            quality_map[str(option_number)] = 'mp3'
+        elif qual == 'best':
             options_text += f"{option_number}. Best available quality\n"
-            resolution_map[str(option_number)] = 'best'
+            quality_map[str(option_number)] = 'best'
         else:
-            options_text += f"{option_number}. {res}\n"
-            resolution_map[str(option_number)] = res
+            options_text += f"{option_number}. {qual}\n"
+            quality_map[str(option_number)] = qual
         option_number += 1
     
     options_text += "\nReply with the number of your choice"
     
     # Store the mapping in user session
-    user_sessions[sender]['resolution_map'] = resolution_map
+    user_sessions[sender]['quality_map'] = quality_map
     
     send_whatsapp_message(options_text)
 
@@ -318,20 +360,20 @@ def handle_webhook():
 
         logger.info(f"PROCESSING MESSAGE FROM {AUTHORIZED_NUMBER}: {message}")
 
-        # Check if this is a resolution selection
-        if sender in user_sessions and user_sessions[sender].get('awaiting_resolution'):
+        # Check if this is a quality selection
+        if sender in user_sessions and user_sessions[sender].get('awaiting_quality'):
             try:
                 choice = message.strip()
-                resolution_map = user_sessions[sender].get('resolution_map', {})
+                quality_map = user_sessions[sender].get('quality_map', {})
                 
-                if choice in resolution_map:
-                    resolution = resolution_map[choice]
+                if choice in quality_map:
+                    quality = quality_map[choice]
                     url = user_sessions[sender]['url']
                     del user_sessions[sender]  # Clear the session
                     
-                    if resolution == 'mp3':
+                    if quality == 'mp3':
                         send_whatsapp_message("⬇️ Downloading MP3 audio...")
-                        file_path, title = download_media(url, resolution)
+                        file_path, title = download_media(url, quality)
                         if file_path:
                             send_whatsapp_file(file_path, f"🎵 {title}", is_video=False)
                             os.remove(file_path)
@@ -339,10 +381,10 @@ def handle_webhook():
                         else:
                             send_whatsapp_message("❌ Failed to download audio. Please try again.")
                     else:
-                        send_whatsapp_message(f"⬇️ Downloading {resolution} quality...")
-                        file_path, title = download_media(url, resolution)
+                        send_whatsapp_message(f"⬇️ Downloading {quality} quality...")
+                        file_path, title = download_media(url, quality)
                         if file_path:
-                            send_whatsapp_file(file_path, f"🎥 {title}\nQuality: {resolution}", is_video=True)
+                            send_whatsapp_file(file_path, f"🎥 {title}\nQuality: {quality}", is_video=True)
                             os.remove(file_path)
                             os.rmdir(os.path.dirname(file_path))
                         else:
@@ -351,24 +393,24 @@ def handle_webhook():
                     send_whatsapp_message("❌ Invalid choice. Please select one of the available options.")
                     # Resend options
                     url = user_sessions[sender]['url']
-                    send_resolution_options(sender, url)
+                    send_quality_options(sender, url)
                 return jsonify({'status': 'processed'})
             except Exception as e:
-                logger.error(f"Error processing resolution choice: {str(e)}")
+                logger.error(f"Error processing quality choice: {str(e)}")
                 send_whatsapp_message("❌ Invalid input. Please try again.")
                 return jsonify({'status': 'processed'})
 
         # Command handling
         if message.lower() in ['hi', 'hello', 'hey']:
             help_text = """👋 Hi! Here's what I can do:
-Paste any video URL (YouTube, Instagram, TikTok, etc.) to download
+Paste any video URL (YouTube, Instagram, TikTok, Facebook, etc.) to download
 /glif [prompt] - Generate custom thumbnail
 /help - Show this message"""
             send_whatsapp_message(help_text)
         
         elif message.lower().startswith(('/help', 'help', 'info')):
             help_text = """ℹ️ Available Commands:
-Paste any video URL (YouTube, Instagram, TikTok, etc.) to download
+Paste any video URL (YouTube, Instagram, TikTok, Facebook, etc.) to download
 /glif [prompt] - Generate thumbnail
 /help - Show this message"""
             send_whatsapp_message(help_text)
@@ -392,8 +434,8 @@ Paste any video URL (YouTube, Instagram, TikTok, etc.) to download
                     send_whatsapp_message("❌ Failed to generate. Please try different keywords.")
         
         # Check if message is a URL
-        elif any(domain in message.lower() for domain in ['http://', 'https://', 'youtube.com', 'youtu.be', 'instagram.com', 'tiktok.com', 'twitter.com', 'fb.com', 'facebook.com']):
-            send_resolution_options(sender, message)
+        elif any(domain in message.lower() for domain in ['http://', 'https://', 'youtube.com', 'youtu.be', 'instagram.com', 'tiktok.com', 'twitter.com', 'fb.com', 'facebook.com', 'twitch.tv', 'dailymotion.com', 'vimeo.com']):
+            send_quality_options(sender, message)
 
         return jsonify({'status': 'processed'})
 
