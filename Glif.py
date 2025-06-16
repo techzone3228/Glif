@@ -142,105 +142,81 @@ def get_available_qualities(url):
             if not info or 'formats' not in info:
                 return None
             
-            # Get all available formats
             formats = info.get('formats', [])
+            quality_map = {}  # Will store format_id for each quality
             
             # For YouTube, use standard resolution mapping
             if 'youtube.com' in url or 'youtu.be' in url:
-                heights = sorted({f.get('height', 0) for f in formats if f.get('vcodec') != 'none'})
-                available = set()
-                for h in heights:
-                    if h >= 1080:
-                        available.add('1080p')
-                    if h >= 720:
-                        available.add('720p')
-                    if h >= 480:
-                        available.add('480p')
-                    if h >= 360:
-                        available.add('360p')
-                    if h >= 144:
-                        available.add('144p')
-                available.add('best')
-                available.add('mp3')
+                for fmt in formats:
+                    if fmt.get('vcodec') != 'none':
+                        height = fmt.get('height', 0)
+                        if height >= 1080:
+                            quality_map['1080p'] = fmt['format_id']
+                        if height >= 720:
+                            quality_map['720p'] = fmt['format_id']
+                        if height >= 480:
+                            quality_map['480p'] = fmt['format_id']
+                        if height >= 360:
+                            quality_map['360p'] = fmt['format_id']
+                        if height >= 144:
+                            quality_map['144p'] = fmt['format_id']
+                
+                # Add best and mp3 options
+                quality_map['best'] = 'bestvideo+bestaudio/best'
+                quality_map['mp3'] = 'bestaudio/best'
+                
                 resolution_order = ['144p', '360p', '480p', '720p', '1080p', 'best', 'mp3']
-                return [res for res in resolution_order if res in available]
+                return {q: quality_map[q] for q in resolution_order if q in quality_map}
             
             # For other platforms, detect actual available qualities
             else:
-                qualities = set()
-                
-                # Check for different quality representations
                 for fmt in formats:
                     if fmt.get('vcodec') != 'none':  # Video format
                         if fmt.get('height'):
-                            qualities.add(f"{fmt['height']}p")
+                            quality = f"{fmt['height']}p"
+                            quality_map[quality] = fmt['format_id']
                         elif fmt.get('quality'):
-                            qualities.add(f"{fmt['quality']}")
+                            quality = f"{fmt['quality']}"
+                            quality_map[quality] = fmt['format_id']
                         elif fmt.get('format_note'):
-                            qualities.add(fmt['format_note'])
+                            quality = fmt['format_note']
+                            quality_map[quality] = fmt['format_id']
                 
                 # Standardize quality names
-                standardized = set()
-                for q in qualities:
+                standardized_map = {}
+                for q, fmt_id in quality_map.items():
                     if isinstance(q, str):
                         # Clean up quality names
                         q_clean = re.sub(r'[^0-9p]', '', q.lower())
                         if 'p' in q_clean:
-                            standardized.add(q_clean)
+                            standardized_map[q_clean] = fmt_id
                         elif q_clean.isdigit():
-                            standardized.add(f"{q_clean}p")
+                            standardized_map[f"{q_clean}p"] = fmt_id
                 
                 # Add best and mp3 options
-                if standardized:
-                    standardized.add('best')
-                standardized.add('mp3')
+                if standardized_map:
+                    standardized_map['best'] = 'bestvideo+bestaudio/best'
+                standardized_map['mp3'] = 'bestaudio/best'
                 
                 # Sort by quality (higher first)
                 sorted_qualities = sorted(
-                    standardized,
-                    key=lambda x: int(x.replace('p', '')) if x.replace('p', '').isdigit() else 0,
+                    standardized_map.items(),
+                    key=lambda x: int(x[0].replace('p', '')) if x[0].replace('p', '').isdigit() else (0, x[0]),
                     reverse=True
                 )
                 
-                return sorted_qualities
+                return dict(sorted_qualities)
             
     except Exception as e:
         logger.error(f"Error checking available qualities: {str(e)}")
-        return ['best', 'mp3']  # Minimal fallback options
+        return {'best': 'bestvideo+bestaudio/best', 'mp3': 'bestaudio/best'}  # Minimal fallback options
 
-def download_media(url, quality):
+def download_media(url, quality, format_id=None):
     """Download media with selected quality"""
     try:
         temp_dir = tempfile.mkdtemp()
         
-        # YouTube-specific format selection
-        if 'youtube.com' in url or 'youtu.be' in url:
-            resolution_map = {
-                '144p': 'bestvideo[height<=144]+bestaudio/best',
-                '360p': 'bestvideo[height<=360]+bestaudio/best',
-                '480p': 'bestvideo[height<=480]+bestaudio/best',
-                '720p': 'bestvideo[height<=720]+bestaudio/best',
-                '1080p': 'bestvideo[height<=1080]+bestaudio/best',
-                'best': 'bestvideo+bestaudio/best',
-                'mp3': 'bestaudio/best'
-            }
-            format_spec = resolution_map.get(quality, 'best')
-        else:
-            # Generic format selection for other platforms
-            if quality == 'mp3':
-                format_spec = 'bestaudio/best'
-            elif quality == 'best':
-                format_spec = 'bestvideo+bestaudio/best'
-            else:
-                # Try to match the exact quality requested
-                height = quality.replace('p', '')
-                if height.isdigit():
-                    format_spec = f'bestvideo[height<={height}]+bestaudio/best'
-                else:
-                    format_spec = f'bestvideo[format_note*={quality}]+bestaudio/best'
-        
         ydl_opts = {
-            'format': format_spec,
             'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
             'cookiefile': COOKIES_FILE,
             'merge_output_format': 'mp4',
@@ -255,13 +231,27 @@ def download_media(url, quality):
             'skip_unavailable_fragments': True
         }
         
-        # Special handling for audio only
         if quality == 'mp3':
+            ydl_opts['format'] = 'bestaudio/best'
             ydl_opts['postprocessors'] = [{
                 'key': 'FFmpegExtractAudio',
                 'preferredcodec': 'mp3',
                 'preferredquality': '192',
             }]
+        else:
+            # Use the specific format_id if provided (for non-YouTube)
+            if format_id:
+                ydl_opts['format'] = format_id
+            else:
+                # For YouTube, use our standard format selection
+                ydl_opts['format'] = {
+                    '144p': 'bestvideo[height<=144]+bestaudio/best',
+                    '360p': 'bestvideo[height<=360]+bestaudio/best',
+                    '480p': 'bestvideo[height<=480]+bestaudio/best',
+                    '720p': 'bestvideo[height<=720]+bestaudio/best',
+                    '1080p': 'bestvideo[height<=1080]+bestaudio/best',
+                    'best': 'bestvideo+bestaudio/best'
+                }.get(quality, 'bestvideo+bestaudio/best')
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -293,39 +283,39 @@ def send_quality_options(sender, url):
     """Check available qualities and send options to user"""
     send_whatsapp_message("🔍 Checking available video qualities...")
     
-    qualities = get_available_qualities(url)
-    if not qualities:
+    quality_map = get_available_qualities(url)
+    if not quality_map:
         send_whatsapp_message("❌ Could not determine available qualities. Trying default options...")
-        qualities = ['best', 'mp3']
+        quality_map = {'best': 'bestvideo+bestaudio/best', 'mp3': 'bestaudio/best'}
     
-    # Store available qualities in user session
+    # Store available qualities in user session with format_ids
     user_sessions[sender] = {
         'url': url,
-        'available_qualities': qualities,
+        'quality_map': quality_map,
         'awaiting_quality': True
     }
     
     # Build options message
     options_text = "📺 Available download options:\n\n"
     option_number = 1
-    quality_map = {}
+    option_map = {}
     
-    for qual in qualities:
+    for qual in quality_map.keys():
         if qual == 'mp3':
             options_text += f"{option_number}. MP3 (Audio only)\n"
-            quality_map[str(option_number)] = 'mp3'
+            option_map[str(option_number)] = ('mp3', None)
         elif qual == 'best':
             options_text += f"{option_number}. Best available quality\n"
-            quality_map[str(option_number)] = 'best'
+            option_map[str(option_number)] = ('best', quality_map[qual])
         else:
             options_text += f"{option_number}. {qual}\n"
-            quality_map[str(option_number)] = qual
+            option_map[str(option_number)] = (qual, quality_map[qual])
         option_number += 1
     
     options_text += "\nReply with the number of your choice"
     
-    # Store the mapping in user session
-    user_sessions[sender]['quality_map'] = quality_map
+    # Store the option mapping in user session
+    user_sessions[sender]['option_map'] = option_map
     
     send_whatsapp_message(options_text)
 
@@ -364,10 +354,10 @@ def handle_webhook():
         if sender in user_sessions and user_sessions[sender].get('awaiting_quality'):
             try:
                 choice = message.strip()
-                quality_map = user_sessions[sender].get('quality_map', {})
+                option_map = user_sessions[sender].get('option_map', {})
                 
-                if choice in quality_map:
-                    quality = quality_map[choice]
+                if choice in option_map:
+                    quality, format_id = option_map[choice]
                     url = user_sessions[sender]['url']
                     del user_sessions[sender]  # Clear the session
                     
@@ -382,7 +372,7 @@ def handle_webhook():
                             send_whatsapp_message("❌ Failed to download audio. Please try again.")
                     else:
                         send_whatsapp_message(f"⬇️ Downloading {quality} quality...")
-                        file_path, title = download_media(url, quality)
+                        file_path, title = download_media(url, quality, format_id)
                         if file_path:
                             send_whatsapp_file(file_path, f"🎥 {title}\nQuality: {quality}", is_video=True)
                             os.remove(file_path)
