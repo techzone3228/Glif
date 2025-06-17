@@ -4,6 +4,7 @@ import requests
 import logging
 import re
 import time
+import json
 
 app = Flask(__name__)
 
@@ -46,13 +47,17 @@ def delete_message(chat_id, message_id):
             timeout=10
         )
         
-        # Check for specific error responses
-        if response.status_code == 400:
+        # Handle both JSON and string responses
+        try:
             error_data = response.json()
-            logger.error(f"API Error: {error_data.get('message', 'Unknown error')}")
+            error_msg = error_data.get('message', str(error_data))
+        except ValueError:
+            error_msg = response.text
+            
+        if response.status_code != 200:
+            logger.error(f"API Error ({response.status_code}): {error_msg}")
             return False
             
-        response.raise_for_status()
         logger.info(f"Successfully deleted message {message_id}")
         return True
         
@@ -97,9 +102,8 @@ def handle_webhook():
             if delete_message(chat_id, message_id):
                 return jsonify({'status': 'deleted'}), 200
             else:
-                logger.warning("Failed to delete message, attempting alternative method")
-                # Try sending a delete request with different content-type
-                return jsonify({'status': 'retrying'}), 200
+                logger.warning("Failed to delete message")
+                return jsonify({'status': 'delete_failed'}), 200
 
         return jsonify({'status': 'no_action'}), 200
 
