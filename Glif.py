@@ -20,7 +20,7 @@ GREEN_API = {
     "apiUrl": "https://7105.api.greenapi.com",
     "mediaUrl": "https://7105.media.greenapi.com"
 }
-AUTHORIZED_NUMBER = "923247220362"
+AUTHORIZED_NUMBER = "923190779215"
 COOKIES_FILE = "cookies.txt"
 
 # GLIF Configuration
