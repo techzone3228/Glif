@@ -17,7 +17,7 @@ GREEN_API = {
     "mediaUrl": "https://7105.media.greenapi.com"
 }
 AUTHORIZED_GROUP = "120363421227499361@g.us"
-BOT_NUMBER = "13656174559@c.us"  # Add your bot's number here
+BOT_NUMBER = "13656174559@c.us"
 
 # ======================
 # LOGGING SETUP
@@ -47,21 +47,31 @@ def send_whatsapp_message(text):
         logger.error(f"Failed to send message: {str(e)}")
         return False
 
-def extract_message_text(message_data):
-    """Extract text from different message types including preview links"""
+def extract_message_text_and_links(message_data):
+    """Extract text and detect links from different message types including previews"""
+    message_text = ""
+    links = []
+    
     if message_data.get('typeMessage') == 'textMessage':
-        return message_data.get('textMessageData', {}).get('textMessage', '').strip()
+        message_text = message_data.get('textMessageData', {}).get('textMessage', '').strip()
     elif message_data.get('typeMessage') == 'extendedTextMessage':
         extended_data = message_data.get('extendedTextMessageData', {})
-        return extended_data.get('text', '').strip()
-    return ''
-
-def is_url(text):
-    """Check if text contains a URL"""
+        message_text = extended_data.get('text', '').strip()
+        
+        # Check for link in preview data
+        if 'previewType' in extended_data and extended_data['previewType'] != 'None':
+            if 'matchText' in extended_data:
+                message_text = extended_data['matchText']
+            elif 'title' in extended_data:
+                message_text = extended_data['title']
+    
+    # URL detection with improved regex
     url_pattern = re.compile(
-        r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+[/\w .-]*/?'
+        r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+'
     )
-    return bool(url_pattern.search(text))
+    links = url_pattern.findall(message_text)
+    
+    return message_text, links
 
 @app.route('/webhook', methods=['POST'])
 def handle_webhook():
@@ -82,21 +92,24 @@ def handle_webhook():
             logger.info("Ignoring bot's own message")
             return jsonify({'status': 'ignored'}), 200
 
-        # Extract message text including preview links
+        # Extract message text and links
         message_data = data.get('messageData', {})
-        message = extract_message_text(message_data)
+        message_text, links = extract_message_text_and_links(message_data)
 
-        if not message:
+        if not message_text:
             logger.warning("Received empty message")
             return jsonify({'status': 'empty_message'}), 200
 
-        logger.info(f"PROCESSING MESSAGE FROM {sender}: {message}")
+        logger.info(f"PROCESSING MESSAGE FROM {sender}: {message_text}")
+        if links:
+            logger.info(f"Detected links: {links}")
 
         # Check if message contains a URL
-        if is_url(message):
-            send_whatsapp_message(f"🔗 URL detected: {message}")
+        if links:
+            for link in links:
+                send_whatsapp_message(f"🔗 URL detected: {link}")
         else:
-            send_whatsapp_message(f"📝 You said: {message}")
+            send_whatsapp_message(f"📝 You said: {message_text}")
 
         return jsonify({'status': 'processed'})
 
@@ -115,7 +128,7 @@ def health_check():
 if __name__ == '__main__':
     logger.info(f"""
     ============================================
-    WhatsApp Echo Bot READY
+    WhatsApp Link Detection Bot READY
     ONLY responding to group: {AUTHORIZED_GROUP}
     Ignoring messages from: {BOT_NUMBER}
     GreenAPI Instance: {GREEN_API['idInstance']}
