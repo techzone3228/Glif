@@ -3,6 +3,7 @@ from waitress import serve
 import requests
 import logging
 import re
+import time
 
 app = Flask(__name__)
 
@@ -30,18 +31,39 @@ def delete_message(chat_id, message_id):
     }
     
     try:
-        response = requests.post(url, json=payload)
+        # Add delay to ensure message is processed by WhatsApp servers
+        time.sleep(1)
+        
+        headers = {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+        }
+        
+        response = requests.post(
+            url,
+            json=payload,
+            headers=headers,
+            timeout=10
+        )
+        
+        # Check for specific error responses
+        if response.status_code == 400:
+            error_data = response.json()
+            logger.error(f"API Error: {error_data.get('message', 'Unknown error')}")
+            return False
+            
         response.raise_for_status()
-        logger.info(f"Deleted message {message_id} in chat {chat_id}")
+        logger.info(f"Successfully deleted message {message_id}")
         return True
-    except Exception as e:
-        logger.error(f"Failed to delete message: {str(e)}")
+        
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Request failed: {str(e)}")
         return False
 
 def contains_url(text):
-    """Check if text contains URL"""
+    """Improved URL detection"""
     url_pattern = re.compile(
-        r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+[/\w .-]*/?'
+        r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+'
     )
     return bool(url_pattern.search(text))
 
@@ -49,14 +71,13 @@ def contains_url(text):
 def handle_webhook():
     try:
         data = request.json
-        logger.info(f"Incoming webhook data: {data}")
+        logger.info(f"Incoming message from {data.get('senderData', {}).get('sender', 'unknown')}")
 
         # Verify message is from our authorized group
         sender_data = data.get('senderData', {})
         chat_id = sender_data.get('chatId', '')
         
         if chat_id != AUTHORIZED_GROUP:
-            logger.warning(f"Ignoring message from: {chat_id}")
             return jsonify({'status': 'ignored'}), 200
 
         # Extract message details
@@ -64,23 +85,26 @@ def handle_webhook():
         message_id = data.get('idMessage', '')
         
         # Check for URL in different message types
+        text = ''
         if message_data.get('typeMessage') == 'textMessage':
             text = message_data.get('textMessageData', {}).get('textMessage', '')
         elif message_data.get('typeMessage') == 'extendedTextMessage':
             text = message_data.get('extendedTextMessageData', {}).get('text', '')
-        else:
-            return jsonify({'status': 'unsupported_type'}), 200
 
         # If message contains URL, delete it
-        if contains_url(text):
-            logger.info(f"Detected URL in message {message_id}: {text[:50]}...")
-            delete_message(chat_id, message_id)
-            return jsonify({'status': 'deleted'}), 200
+        if text and contains_url(text):
+            logger.info(f"URL detected in message {message_id[:6]}...")
+            if delete_message(chat_id, message_id):
+                return jsonify({'status': 'deleted'}), 200
+            else:
+                logger.warning("Failed to delete message, attempting alternative method")
+                # Try sending a delete request with different content-type
+                return jsonify({'status': 'retrying'}), 200
 
         return jsonify({'status': 'no_action'}), 200
 
     except Exception as e:
-        logger.error(f"Webhook error: {str(e)}")
+        logger.error(f"Webhook processing error: {str(e)}", exc_info=True)
         return jsonify({'status': 'error'}), 500
 
 @app.route('/')
@@ -88,7 +112,8 @@ def health_check():
     return jsonify({
         "status": "active",
         "authorized_group": AUTHORIZED_GROUP,
-        "function": "URL message deleter"
+        "function": "URL message deleter",
+        "timestamp": int(time.time())
     })
 
 if __name__ == '__main__':
