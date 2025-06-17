@@ -20,19 +20,10 @@ GREEN_API = {
     "apiUrl": "https://7105.api.greenapi.com",
     "mediaUrl": "https://7105.media.greenapi.com"
 }
-AUTHORIZED_NUMBER = "923190779215"
+AUTHORIZED_GROUP = "120363421227499361@g.us"
+ADMIN_NUMBERS = ["923190779215@c.us"]  # Add admin numbers with @c.us suffix
 COOKIES_FILE = "cookies.txt"
-
-# GLIF Configuration
-GLIF_ID = "cm0zceq2a00023f114o6hti7w"
-GLIF_TOKENS = [
-    "glif_a4ef6d3aa5d8575ea8448b29e293919a42a6869143fcbfc32f2e4a7dbe53199a",
-    "glif_51d216db54438b777c4170cd8913d628ff0af09789ed5dbcbd718fa6c6968bb1",
-    "glif_c9dc66b31537b5a423446bbdead5dc2dbd73dc1f4a5c47a9b77328abcbc7b755",
-    "glif_f5a55ee6d767b79f2f3af01c276ec53d14475eace7cabf34b22f8e5968f3fef5",
-    "glif_c3a7fd4779b59f59c08d17d4a7db46beefa3e9e49a9ebc4921ecaca35c556ab7",
-    "glif_b31fdc2c9a7aaac0ec69d5f59bf05ccea0c5786990ef06b79a1d7db8e37ba317"
-]
+MAX_FILE_SIZE_MB = 100  # Maximum allowed file size in MB
 
 # User session data
 user_sessions = {}
@@ -51,10 +42,10 @@ logger = logging.getLogger(__name__)
 # CORE FUNCTIONS
 # ======================
 def send_whatsapp_message(text):
-    """Send text message to authorized number"""
+    """Send text message to authorized group"""
     url = f"{GREEN_API['apiUrl']}/waInstance{GREEN_API['idInstance']}/sendMessage/{GREEN_API['apiToken']}"
     payload = {
-        "chatId": f"{AUTHORIZED_NUMBER}@c.us",
+        "chatId": AUTHORIZED_GROUP,
         "message": text
     }
     headers = {'Content-Type': 'application/json'}
@@ -62,15 +53,21 @@ def send_whatsapp_message(text):
     try:
         response = requests.post(url, json=payload, headers=headers)
         response.raise_for_status()
-        logger.info(f"Message sent: {text[:50]}...")
+        logger.info(f"Message sent to group: {text[:50]}...")
         return True
     except Exception as e:
-        logger.error(f"Failed to send message: {str(e)}")
+        logger.error(f"Failed to send message to group: {str(e)}")
         return False
 
 def send_whatsapp_file(file_path, caption, is_video=False):
-    """Send file (video or image) with caption"""
+    """Send file (video or image) with caption to group"""
     try:
+        # Check file size before sending
+        file_size = os.path.getsize(file_path) / (1024 * 1024)  # Size in MB
+        if file_size > MAX_FILE_SIZE_MB:
+            logger.warning(f"File too large: {file_size:.2f}MB")
+            return False
+            
         url = f"{GREEN_API['mediaUrl']}/waInstance{GREEN_API['idInstance']}/sendFileByUpload/{GREEN_API['apiToken']}"
         
         with open(file_path, 'rb') as file:
@@ -78,40 +75,18 @@ def send_whatsapp_file(file_path, caption, is_video=False):
                 'file': (os.path.basename(file_path), file, 'video/mp4' if is_video else 'audio/mpeg' if file_path.endswith('.mp3') else 'image/jpeg')
             }
             data = {
-                'chatId': f"{AUTHORIZED_NUMBER}@c.us",
+                'chatId': AUTHORIZED_GROUP,
                 'caption': caption
             }
             
             response = requests.post(url, files=files, data=data)
             response.raise_for_status()
-            logger.info(f"File sent with caption: {caption[:50]}...")
+            logger.info(f"File sent to group with caption: {caption[:50]}...")
             return True
             
     except Exception as e:
-        logger.error(f"File upload failed: {str(e)}")
+        logger.error(f"File upload to group failed: {str(e)}")
         return False
-
-def generate_thumbnail(prompt):
-    """Generate thumbnail using GLIF API"""
-    prompt = prompt[:100]  # Limit prompt length
-    for token in GLIF_TOKENS:
-        try:
-            response = requests.post(
-                f"https://simple-api.glif.app/{GLIF_ID}",
-                headers={"Authorization": f"Bearer {token}"},
-                json={"prompt": prompt, "style": "youtube_trending"},
-                timeout=30
-            )
-            data = response.json()
-            
-            # Check all possible response formats
-            for key in ["output", "image_url", "url"]:
-                if key in data and isinstance(data[key], str) and data[key].startswith('http'):
-                    logger.info(f"Generated thumbnail using token {token[-6:]}")
-                    return {'status': 'success', 'image_url': data[key]}
-        except Exception as e:
-            logger.warning(f"GLIF token {token[-6:]} failed: {str(e)}")
-    return {'status': 'error'}
 
 def check_audio(filename):
     """Check if file has audio stream"""
@@ -128,17 +103,24 @@ def check_audio(filename):
 
 def is_youtube_url(url):
     """Check if URL is from YouTube"""
-    return 'youtube.com' in url or 'youtu.be' in url
+    youtube_pattern = r'(https?://)?(www\.)?(youtube|youtu)\.(com|be)/.+'
+    return re.match(youtube_pattern, url) is not None
+
+def is_supported_url(url):
+    """Check if URL is from supported platforms"""
+    supported_patterns = [
+        r'(https?://)?(www\.)?(youtube|youtu)\.(com|be)/.+',
+        r'(https?://)?(www\.)?instagram\.com/.+',
+        r'(https?://)?(www\.)?tiktok\.com/.+',
+        r'(https?://)?(www\.)?facebook\.com/.+',
+        r'(https?://)?(www\.)?twitter\.com/.+',
+        r'(https?://)?(www\.)?dailymotion\.com/.+',
+        r'(https?://)?(www\.)?vimeo\.com/.+'
+    ]
+    return any(re.match(pattern, url) for pattern in supported_patterns)
 
 def get_available_qualities(url):
-    """Check available qualities for YouTube videos"""
-    if is_youtube_url(url):
-        return get_youtube_qualities(url)
-    else:
-        return get_other_platform_qualities(url)
-
-def get_youtube_qualities(url):
-    """Get YouTube-specific quality options"""
+    """Check available qualities for videos"""
     try:
         ydl_opts = {
             'quiet': True,
@@ -178,73 +160,7 @@ def get_youtube_qualities(url):
             return {q: quality_map[q] for q in resolution_order if q in quality_map}
             
     except Exception as e:
-        logger.error(f"Error checking YouTube qualities: {str(e)}")
-        return {'best': 'bestvideo+bestaudio/best', 'mp3': 'bestaudio/best'}
-
-def get_other_platform_qualities(url):
-    """Get quality options for non-YouTube platforms"""
-    try:
-        ydl_opts = {'quiet': True}
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            formats = info.get('formats', [])
-            
-            if not formats:
-                return None
-
-            # Group formats by quality
-            video_formats = []
-            audio_formats = []
-            
-            for f in formats:
-                if f.get('acodec') != 'none' and f.get('vcodec') != 'none':
-                    # Video format
-                    res = f.get('height', 0)
-                    video_formats.append({
-                        'id': f['format_id'],
-                        'quality': f"{res}p",
-                        'type': 'video'
-                    })
-                elif f.get('acodec') != 'none':
-                    # Audio format
-                    abr = f.get('abr', 0)
-                    audio_formats.append({
-                        'id': f['format_id'],
-                        'quality': f"{abr}kbps",
-                        'type': 'audio'
-                    })
-
-            # Remove duplicate qualities
-            seen_video = set()
-            unique_video = []
-            for v in sorted(video_formats, key=lambda x: float(x['quality'].replace('p', '')), reverse=True):
-                if v['quality'] not in seen_video:
-                    seen_video.add(v['quality'])
-                    unique_video.append(v)
-            
-            seen_audio = set()
-            unique_audio = []
-            for a in sorted(audio_formats, key=lambda x: float(x['quality'].replace('kbps', '')), reverse=True):
-                if a['quality'] not in seen_audio:
-                    seen_audio.add(a['quality'])
-                    unique_audio.append(a)
-
-            # Prepare quality map
-            quality_map = {}
-            for fmt in unique_video:
-                quality_map[fmt['quality']] = fmt['id']
-            
-            for fmt in unique_audio:
-                quality_map[f"{fmt['quality']} (Audio)"] = fmt['id']
-            
-            # Add best quality option
-            quality_map['best'] = 'bestvideo+bestaudio/best'
-            quality_map['mp3'] = 'bestaudio/best'
-            
-            return quality_map
-            
-    except Exception as e:
-        logger.error(f"Error getting other platform formats: {str(e)}")
+        logger.error(f"Error checking video qualities: {str(e)}")
         return {'best': 'bestvideo+bestaudio/best', 'mp3': 'bestaudio/best'}
 
 def download_media(url, quality, format_id=None):
@@ -275,23 +191,18 @@ def download_media(url, quality, format_id=None):
                 'preferredquality': '192',
             }]
         else:
-            # For YouTube, use our standard format selection
-            if is_youtube_url(url):
-                ydl_opts['format'] = {
-                    '144p': 'bestvideo[height<=144]+bestaudio/best',
-                    '360p': 'bestvideo[height<=360]+bestaudio/best',
-                    '480p': 'bestvideo[height<=480]+bestaudio/best',
-                    '720p': 'bestvideo[height<=720]+bestaudio/best',
-                    '1080p': 'bestvideo[height<=1080]+bestaudio/best',
-                    'best': 'bestvideo+bestaudio/best'
-                }.get(quality, 'bestvideo+bestaudio/best')
-            else:
-                # For other platforms, use the specific format_id
-                ydl_opts['format'] = format_id if format_id else 'bestvideo+bestaudio/best'
+            ydl_opts['format'] = format_id if format_id else 'bestvideo+bestaudio/best'
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
             filename = ydl.prepare_filename(info)
+            
+            # Check file size before proceeding
+            if os.path.exists(filename):
+                file_size = os.path.getsize(filename) / (1024 * 1024)  # Size in MB
+                if file_size > MAX_FILE_SIZE_MB:
+                    logger.warning(f"Downloaded file too large: {file_size:.2f}MB")
+                    return None, None
             
             if quality == 'mp3':
                 mp3_file = filename.replace('.webm', '.mp3').replace('.m4a', '.mp3')
@@ -316,12 +227,15 @@ def download_media(url, quality, format_id=None):
             logger.warning(f"Error cleaning temp dir: {str(e)}")
 
 def send_quality_options(sender, url):
-    """Check available qualities and send options to user"""
-    send_whatsapp_message("🔍 Checking available video qualities...")
+    """Check available qualities and send options to group"""
+    send_whatsapp_message("🔍 Analyzing video... Please wait...")
+    
+    if not is_supported_url(url):
+        send_whatsapp_message("⚠️ Unsupported platform. Trying to download anyway...")
     
     quality_map = get_available_qualities(url)
     if not quality_map:
-        send_whatsapp_message("❌ Could not determine available qualities. Trying default options...")
+        send_whatsapp_message("⚠️ Could not determine available qualities. Using default options...")
         quality_map = {'best': 'bestvideo+bestaudio/best', 'mp3': 'bestaudio/best'}
     
     # Store available qualities in user session with format_ids
@@ -332,19 +246,19 @@ def send_quality_options(sender, url):
     }
     
     # Build options message
-    options_text = "📺 Available download options:\n\n"
+    options_text = "📺 Available Download Options:\n\n"
     option_number = 1
     option_map = {}
     
     for qual in quality_map.keys():
-        if qual == 'mp3' or '(Audio)' in qual:
-            options_text += f"{option_number}. MP3 (Audio only)\n"
+        if qual == 'mp3':
+            options_text += f"{option_number}. 🎵 MP3 Audio (Best Quality)\n"
             option_map[str(option_number)] = ('mp3', None)
         elif qual == 'best':
-            options_text += f"{option_number}. Best available quality\n"
+            options_text += f"{option_number}. 🏆 Best Available Quality\n"
             option_map[str(option_number)] = ('best', quality_map[qual])
         else:
-            options_text += f"{option_number}. {qual}\n"
+            options_text += f"{option_number}. 🎬 {qual} Video\n"
             option_map[str(option_number)] = (qual, quality_map[qual])
         option_number += 1
     
@@ -355,6 +269,13 @@ def send_quality_options(sender, url):
     
     send_whatsapp_message(options_text)
 
+def reset_bot():
+    """Reset bot by clearing all sessions and temporary files"""
+    global user_sessions
+    user_sessions = {}
+    logger.info("Bot has been reset - all sessions cleared")
+    return True
+
 # ======================
 # WEBHOOK HANDLER
 # ======================
@@ -362,14 +283,19 @@ def send_quality_options(sender, url):
 def handle_webhook():
     try:
         data = request.json
-        logger.info(f"RAW WEBHOOK DATA:\n{data}")
+        logger.info(f"Incoming webhook data: {data}")
 
-        # Verify sender
-        sender = data.get('senderData', {}).get('sender', '')
-        if not sender.endswith(f"{AUTHORIZED_NUMBER}@c.us"):
-            logger.warning(f"Ignoring message from: {sender}")
+        # Verify message is from our authorized group
+        sender_data = data.get('senderData', {})
+        chat_id = sender_data.get('chatId', '')
+        
+        if chat_id != AUTHORIZED_GROUP:
+            logger.warning(f"Ignoring message from: {chat_id}")
             return jsonify({'status': 'ignored'}), 200
 
+        # Extract sender number for session tracking
+        sender = sender_data.get('sender', '')
+        
         # Extract message text
         message_data = data.get('messageData', {})
         if message_data.get('typeMessage') == 'textMessage':
@@ -384,7 +310,13 @@ def handle_webhook():
             logger.warning("Received empty message")
             return jsonify({'status': 'empty_message'}), 200
 
-        logger.info(f"PROCESSING MESSAGE FROM {AUTHORIZED_NUMBER}: {message}")
+        logger.info(f"Processing message from {sender} in group {AUTHORIZED_GROUP}: {message}")
+
+        # Check admin commands first
+        if message.lower() == '/reset' and sender in ADMIN_NUMBERS:
+            reset_bot()
+            send_whatsapp_message("🔄 Bot has been reset successfully")
+            return jsonify({'status': 'processed'})
 
         # Check if this is a quality selection
         if sender in user_sessions and user_sessions[sender].get('awaiting_quality'):
@@ -397,21 +329,31 @@ def handle_webhook():
                     url = user_sessions[sender]['url']
                     del user_sessions[sender]  # Clear the session
                     
-                    if quality == 'mp3' or '(Audio)' in quality:
-                        send_whatsapp_message("⬇️ Downloading MP3 audio...")
+                    if quality == 'mp3':
+                        send_whatsapp_message("⬇️ Downloading audio... Please wait...")
                         file_path, title = download_media(url, 'mp3')
                         if file_path:
-                            send_whatsapp_file(file_path, f"🎵 {title}", is_video=False)
-                            os.remove(file_path)
+                            file_size = os.path.getsize(file_path) / (1024 * 1024)
+                            if file_size > MAX_FILE_SIZE_MB:
+                                send_whatsapp_message(f"❌ File size ({file_size:.1f}MB) exceeds maximum allowed {MAX_FILE_SIZE_MB}MB")
+                                os.remove(file_path)
+                            else:
+                                send_whatsapp_file(file_path, f"🎵 {title}\n👤 Shared by: {sender.split('@')[0]}", is_video=False)
+                                os.remove(file_path)
                             os.rmdir(os.path.dirname(file_path))
                         else:
                             send_whatsapp_message("❌ Failed to download audio. Please try again.")
                     else:
-                        send_whatsapp_message(f"⬇️ Downloading {quality} quality...")
+                        send_whatsapp_message(f"⬇️ Downloading {quality} quality... Please wait...")
                         file_path, title = download_media(url, quality, format_id)
                         if file_path:
-                            send_whatsapp_file(file_path, f"🎥 {title}\nQuality: {quality}", is_video=True)
-                            os.remove(file_path)
+                            file_size = os.path.getsize(file_path) / (1024 * 1024)
+                            if file_size > MAX_FILE_SIZE_MB:
+                                send_whatsapp_message(f"❌ File size ({file_size:.1f}MB) exceeds maximum allowed {MAX_FILE_SIZE_MB}MB")
+                                os.remove(file_path)
+                            else:
+                                send_whatsapp_file(file_path, f"🎥 {title}\n📏 Quality: {quality}\n👤 Shared by: {sender.split('@')[0]}", is_video=True)
+                                os.remove(file_path)
                             os.rmdir(os.path.dirname(file_path))
                         else:
                             send_whatsapp_message("❌ Failed to download media. Please try again.")
@@ -427,37 +369,47 @@ def handle_webhook():
                 return jsonify({'status': 'processed'})
 
         # Command handling
-        if message.lower() in ['hi', 'hello', 'hey']:
-            help_text = """👋 Hi! Here's what I can do:
-Paste any video URL (YouTube, Instagram, TikTok, Facebook, etc.) to download
-/glif [prompt] - Generate custom thumbnail
-/help - Show this message"""
+        if message.lower() in ['hi', 'hello', 'hey', '/start']:
+            help_text = """🤖 *Media Download Bot* 🤖
+
+*Supported Platforms:*
+- YouTube
+- Instagram
+- TikTok
+- Facebook
+- Twitter
+- Dailymotion
+- Vimeo
+
+*How To Use:*
+1. Simply paste any video URL
+2. Select your preferred quality
+3. Receive your media in the group
+
+*Features:*
+- Multiple quality options
+- MP3 audio extraction
+- Automatic thumbnail preservation
+- Fast downloads
+
+*Note:* Maximum file size is 100MB"""
             send_whatsapp_message(help_text)
         
         elif message.lower().startswith(('/help', 'help', 'info')):
-            help_text = """ℹ️ Available Commands:
-Paste any video URL (YouTube, Instagram, TikTok, Facebook, etc.) to download
-/glif [prompt] - Generate thumbnail
-/help - Show this message"""
+            help_text = """ℹ️ *Bot Help Guide* ℹ️
+
+*Available Commands:*
+- Just paste any video URL to download
+- /help - Show this message
+
+*Supported Platforms:*
+YouTube, Instagram, TikTok, Facebook, Twitter, Dailymotion, Vimeo
+
+*Tips:*
+- For best quality, select 'Best Available Quality'
+- For audio only, select 'MP3 Audio'
+- Maximum file size is 100MB"""
             send_whatsapp_message(help_text)
-        
-        elif message.lower().startswith('/glif '):
-            prompt = message[6:].strip()
-            if prompt:
-                send_whatsapp_message("🔄 Generating your thumbnail... (20-30 seconds)")
-                result = generate_thumbnail(prompt)
-                if result['status'] == 'success':
-                    # Download the image first
-                    response = requests.get(result['image_url'])
-                    temp_file = os.path.join(tempfile.gettempdir(), "thumbnail.jpg")
-                    with open(temp_file, 'wb') as f:
-                        f.write(response.content)
-                    # Send as file with caption
-                    send_whatsapp_file(temp_file, f"🎨 Thumbnail for: {prompt}")
-                    send_whatsapp_message(f"🔗 Direct URL: {result['image_url']}")
-                    os.remove(temp_file)
-                else:
-                    send_whatsapp_message("❌ Failed to generate. Please try different keywords.")
         
         # Check if message is a URL
         elif any(proto in message.lower() for proto in ['http://', 'https://']):
@@ -476,9 +428,10 @@ Paste any video URL (YouTube, Instagram, TikTok, Facebook, etc.) to download
 def health_check():
     return jsonify({
         "status": "active",
-        "authorized_number": AUTHORIZED_NUMBER,
+        "authorized_group": AUTHORIZED_GROUP,
         "instance_id": GREEN_API['idInstance'],
-        "timestamp": datetime.now().isoformat()
+        "timestamp": datetime.now().isoformat(),
+        "sessions_active": len(user_sessions)
     })
 
 # ======================
@@ -493,8 +446,10 @@ if __name__ == '__main__':
     
     logger.info(f"""
     ============================================
-    WhatsApp Media Bot READY
-    ONLY responding to: {AUTHORIZED_NUMBER}
+    WhatsApp Group Media Bot READY
+    Authorized Group: {AUTHORIZED_GROUP}
+    Admin Numbers: {ADMIN_NUMBERS}
+    Max File Size: {MAX_FILE_SIZE_MB}MB
     GreenAPI Instance: {GREEN_API['idInstance']}
     ============================================
     """)
