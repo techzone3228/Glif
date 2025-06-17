@@ -20,19 +20,10 @@ GREEN_API = {
     "apiUrl": "https://7105.api.greenapi.com",
     "mediaUrl": "https://7105.media.greenapi.com"
 }
-AUTHORIZED_NUMBER = "923190779215"
+AUTHORIZED_GROUP = "120363421227499361@g.us"
+ADMIN_NUMBER = "923190779215"  # Only this number can use /reset
 COOKIES_FILE = "cookies.txt"
-
-# GLIF Configuration
-GLIF_ID = "cm0zceq2a00023f114o6hti7w"
-GLIF_TOKENS = [
-    "glif_a4ef6d3aa5d8575ea8448b29e293919a42a6869143fcbfc32f2e4a7dbe53199a",
-    "glif_51d216db54438b777c4170cd8913d628ff0af09789ed5dbcbd718fa6c6968bb1",
-    "glif_c9dc66b31537b5a423446bbdead5dc2dbd73dc1f4a5c47a9b77328abcbc7b755",
-    "glif_f5a55ee6d767b79f2f3af01c276ec53d14475eace7cabf34b22f8e5968f3fef5",
-    "glif_c3a7fd4779b59f59c08d17d4a7db46beefa3e9e49a9ebc4921ecaca35c556ab7",
-    "glif_b31fdc2c9a7aaac0ec69d5f59bf05ccea0c5786990ef06b79a1d7db8e37ba317"
-]
+MAX_FILE_SIZE_MB = 100  # 100MB maximum file size
 
 # User session data
 user_sessions = {}
@@ -51,10 +42,10 @@ logger = logging.getLogger(__name__)
 # CORE FUNCTIONS
 # ======================
 def send_whatsapp_message(text):
-    """Send text message to authorized number"""
+    """Send text message to authorized group"""
     url = f"{GREEN_API['apiUrl']}/waInstance{GREEN_API['idInstance']}/sendMessage/{GREEN_API['apiToken']}"
     payload = {
-        "chatId": f"{AUTHORIZED_NUMBER}@c.us",
+        "chatId": AUTHORIZED_GROUP,
         "message": text
     }
     headers = {'Content-Type': 'application/json'}
@@ -71,6 +62,12 @@ def send_whatsapp_message(text):
 def send_whatsapp_file(file_path, caption, is_video=False):
     """Send file (video or image) with caption"""
     try:
+        # Check file size
+        file_size = os.path.getsize(file_path) / (1024 * 1024)  # Size in MB
+        if file_size > MAX_FILE_SIZE_MB:
+            logger.warning(f"File too large: {file_size:.2f}MB")
+            return False
+            
         url = f"{GREEN_API['mediaUrl']}/waInstance{GREEN_API['idInstance']}/sendFileByUpload/{GREEN_API['apiToken']}"
         
         with open(file_path, 'rb') as file:
@@ -78,7 +75,7 @@ def send_whatsapp_file(file_path, caption, is_video=False):
                 'file': (os.path.basename(file_path), file, 'video/mp4' if is_video else 'audio/mpeg' if file_path.endswith('.mp3') else 'image/jpeg')
             }
             data = {
-                'chatId': f"{AUTHORIZED_NUMBER}@c.us",
+                'chatId': AUTHORIZED_GROUP,
                 'caption': caption
             }
             
@@ -90,28 +87,6 @@ def send_whatsapp_file(file_path, caption, is_video=False):
     except Exception as e:
         logger.error(f"File upload failed: {str(e)}")
         return False
-
-def generate_thumbnail(prompt):
-    """Generate thumbnail using GLIF API"""
-    prompt = prompt[:100]  # Limit prompt length
-    for token in GLIF_TOKENS:
-        try:
-            response = requests.post(
-                f"https://simple-api.glif.app/{GLIF_ID}",
-                headers={"Authorization": f"Bearer {token}"},
-                json={"prompt": prompt, "style": "youtube_trending"},
-                timeout=30
-            )
-            data = response.json()
-            
-            # Check all possible response formats
-            for key in ["output", "image_url", "url"]:
-                if key in data and isinstance(data[key], str) and data[key].startswith('http'):
-                    logger.info(f"Generated thumbnail using token {token[-6:]}")
-                    return {'status': 'success', 'image_url': data[key]}
-        except Exception as e:
-            logger.warning(f"GLIF token {token[-6:]} failed: {str(e)}")
-    return {'status': 'error'}
 
 def check_audio(filename):
     """Check if file has audio stream"""
@@ -293,6 +268,12 @@ def download_media(url, quality, format_id=None):
             info = ydl.extract_info(url, download=True)
             filename = ydl.prepare_filename(info)
             
+            # Check file size before proceeding
+            file_size = os.path.getsize(filename) / (1024 * 1024)  # Size in MB
+            if file_size > MAX_FILE_SIZE_MB:
+                logger.warning(f"File too large: {file_size:.2f}MB")
+                return None, None
+            
             if quality == 'mp3':
                 mp3_file = filename.replace('.webm', '.mp3').replace('.m4a', '.mp3')
                 if os.path.exists(mp3_file):
@@ -355,6 +336,13 @@ def send_quality_options(sender, url):
     
     send_whatsapp_message(options_text)
 
+def reset_bot():
+    """Reset bot state completely"""
+    global user_sessions
+    user_sessions = {}
+    logger.info("Bot has been reset - all user sessions cleared")
+    return True
+
 # ======================
 # WEBHOOK HANDLER
 # ======================
@@ -364,10 +352,13 @@ def handle_webhook():
         data = request.json
         logger.info(f"RAW WEBHOOK DATA:\n{data}")
 
-        # Verify sender
-        sender = data.get('senderData', {}).get('sender', '')
-        if not sender.endswith(f"{AUTHORIZED_NUMBER}@c.us"):
-            logger.warning(f"Ignoring message from: {sender}")
+        # Verify sender is from our authorized group
+        sender_data = data.get('senderData', {})
+        sender = sender_data.get('sender', '')
+        chat_id = sender_data.get('chatId', '')
+        
+        if chat_id != AUTHORIZED_GROUP:
+            logger.warning(f"Ignoring message from: {chat_id}")
             return jsonify({'status': 'ignored'}), 200
 
         # Extract message text
@@ -384,7 +375,7 @@ def handle_webhook():
             logger.warning("Received empty message")
             return jsonify({'status': 'empty_message'}), 200
 
-        logger.info(f"PROCESSING MESSAGE FROM {AUTHORIZED_NUMBER}: {message}")
+        logger.info(f"PROCESSING MESSAGE FROM {sender}: {message}")
 
         # Check if this is a quality selection
         if sender in user_sessions and user_sessions[sender].get('awaiting_quality'):
@@ -405,7 +396,7 @@ def handle_webhook():
                             os.remove(file_path)
                             os.rmdir(os.path.dirname(file_path))
                         else:
-                            send_whatsapp_message("❌ Failed to download audio. Please try again.")
+                            send_whatsapp_message("❌ Failed to download audio. The file may be too large (max 100MB) or unavailable.")
                     else:
                         send_whatsapp_message(f"⬇️ Downloading {quality} quality...")
                         file_path, title = download_media(url, quality, format_id)
@@ -414,7 +405,7 @@ def handle_webhook():
                             os.remove(file_path)
                             os.rmdir(os.path.dirname(file_path))
                         else:
-                            send_whatsapp_message("❌ Failed to download media. Please try again.")
+                            send_whatsapp_message("❌ Failed to download media. The file may be too large (max 100MB) or unavailable.")
                 else:
                     send_whatsapp_message("❌ Invalid choice. Please select one of the available options.")
                     # Resend options
@@ -428,36 +419,43 @@ def handle_webhook():
 
         # Command handling
         if message.lower() in ['hi', 'hello', 'hey']:
-            help_text = """👋 Hi! Here's what I can do:
-Paste any video URL (YouTube, Instagram, TikTok, Facebook, etc.) to download
-/glif [prompt] - Generate custom thumbnail
-/help - Show this message"""
+            help_text = """👋 *Welcome to Media Downloader Bot*
+
+Here's what I can do for you:
+
+• Simply paste any video URL (YouTube, Instagram, TikTok, Facebook, etc.) to download
+
+• The bot will show available quality options
+
+• Select your preferred quality by replying with the number
+
+• Maximum file size: 100MB
+
+Need help? Type /help"""
             send_whatsapp_message(help_text)
         
         elif message.lower().startswith(('/help', 'help', 'info')):
-            help_text = """ℹ️ Available Commands:
-Paste any video URL (YouTube, Instagram, TikTok, Facebook, etc.) to download
-/glif [prompt] - Generate thumbnail
-/help - Show this message"""
+            help_text = """ℹ️ *Media Downloader Bot Help*
+
+*How to use:*
+1. Send any video URL (YouTube, Instagram, TikTok, etc.)
+2. The bot will show available quality options
+3. Reply with the number of your choice
+4. Receive your downloaded media
+
+*Notes:*
+- Maximum file size: 100MB
+- For audio-only, choose MP3 option
+- Some videos may not be available in all qualities
+
+Admin commands:
+/reset - Reset bot state (admin only)"""
             send_whatsapp_message(help_text)
         
-        elif message.lower().startswith('/glif '):
-            prompt = message[6:].strip()
-            if prompt:
-                send_whatsapp_message("🔄 Generating your thumbnail... (20-30 seconds)")
-                result = generate_thumbnail(prompt)
-                if result['status'] == 'success':
-                    # Download the image first
-                    response = requests.get(result['image_url'])
-                    temp_file = os.path.join(tempfile.gettempdir(), "thumbnail.jpg")
-                    with open(temp_file, 'wb') as f:
-                        f.write(response.content)
-                    # Send as file with caption
-                    send_whatsapp_file(temp_file, f"🎨 Thumbnail for: {prompt}")
-                    send_whatsapp_message(f"🔗 Direct URL: {result['image_url']}")
-                    os.remove(temp_file)
-                else:
-                    send_whatsapp_message("❌ Failed to generate. Please try different keywords.")
+        # Admin command
+        elif message.lower() == '/reset' and sender.startswith(f"{ADMIN_NUMBER}@"):
+            reset_bot()
+            send_whatsapp_message("🔄 Bot has been reset to initial state")
         
         # Check if message is a URL
         elif any(proto in message.lower() for proto in ['http://', 'https://']):
@@ -476,9 +474,10 @@ Paste any video URL (YouTube, Instagram, TikTok, Facebook, etc.) to download
 def health_check():
     return jsonify({
         "status": "active",
-        "authorized_number": AUTHORIZED_NUMBER,
+        "authorized_group": AUTHORIZED_GROUP,
         "instance_id": GREEN_API['idInstance'],
-        "timestamp": datetime.now().isoformat()
+        "timestamp": datetime.now().isoformat(),
+        "active_sessions": len(user_sessions)
     })
 
 # ======================
@@ -494,31 +493,10 @@ if __name__ == '__main__':
     logger.info(f"""
     ============================================
     WhatsApp Media Bot READY
-    ONLY responding to: {AUTHORIZED_NUMBER}
+    ONLY responding to group: {AUTHORIZED_GROUP}
+    Admin number: {ADMIN_NUMBER}
     GreenAPI Instance: {GREEN_API['idInstance']}
+    Max file size: {MAX_FILE_SIZE_MB}MB
     ============================================
     """)
     serve(app, host='0.0.0.0', port=8000)
-
-
-
-
-
-modify the script a little bit such that. The bot only reply only to a group chat . so authorized number should be changed to an authorized group with below id
-
-
-120363421227499361@g.us
-
-and remove /glif command and its all related stuff and also make the Bot More Professional.
-
-i mean better user guide. for example the reply for hi message is messed , it should look like professional separated by line spaces.
-
-
-if the selected video size is above 100Mb , the bot should skip it and send user error message that the video size exceeds 100MB.
-
-also add an admin only command /reset
-
-which restores the bot like starting from zero (terminating all tasks and user sessions)
-
-
-except this nothing and nothing should be changed or removed from script. all bot functionality should remain exactly same
