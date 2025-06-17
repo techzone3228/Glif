@@ -268,20 +268,27 @@ def download_media(url, quality, format_id=None):
             info = ydl.extract_info(url, download=True)
             filename = ydl.prepare_filename(info)
             
-            # Check file size before proceeding
-            file_size = os.path.getsize(filename) / (1024 * 1024)  # Size in MB
-            if file_size > MAX_FILE_SIZE_MB:
-                logger.warning(f"File too large: {file_size:.2f}MB")
-                return None, None
-            
             if quality == 'mp3':
-                mp3_file = filename.replace('.webm', '.mp3').replace('.m4a', '.mp3')
+                # Handle audio conversion
+                base, ext = os.path.splitext(filename)
+                mp3_file = base + '.mp3'
                 if os.path.exists(mp3_file):
+                    # Check file size before returning
+                    file_size = os.path.getsize(mp3_file) / (1024 * 1024)
+                    if file_size > MAX_FILE_SIZE_MB:
+                        os.remove(mp3_file)
+                        return None, None
                     return mp3_file, info.get('title', 'audio')
             else:
+                # Handle video files
                 if check_audio(filename):
                     new_filename = f"{os.path.splitext(filename)[0]}_{quality}.mp4"
                     os.rename(filename, new_filename)
+                    # Check file size before returning
+                    file_size = os.path.getsize(new_filename) / (1024 * 1024)
+                    if file_size > MAX_FILE_SIZE_MB:
+                        os.remove(new_filename)
+                        return None, None
                     return new_filename, info.get('title', 'video')
                 
         return None, None
@@ -291,8 +298,19 @@ def download_media(url, quality, format_id=None):
         return None, None
     finally:
         try:
-            if os.path.exists(temp_dir) and not os.listdir(temp_dir):
-                os.rmdir(temp_dir)
+            # Clean up temp directory
+            if os.path.exists(temp_dir):
+                for filename in os.listdir(temp_dir):
+                    file_path = os.path.join(temp_dir, filename)
+                    try:
+                        if os.path.isfile(file_path):
+                            os.unlink(file_path)
+                    except Exception as e:
+                        logger.error(f"Error deleting temp file {file_path}: {e}")
+                try:
+                    os.rmdir(temp_dir)
+                except OSError:
+                    pass
         except Exception as e:
             logger.warning(f"Error cleaning temp dir: {str(e)}")
 
@@ -393,8 +411,11 @@ def handle_webhook():
                         file_path, title = download_media(url, 'mp3')
                         if file_path:
                             send_whatsapp_file(file_path, f"🎵 {title}", is_video=False)
-                            os.remove(file_path)
-                            os.rmdir(os.path.dirname(file_path))
+                            try:
+                                os.remove(file_path)
+                                os.rmdir(os.path.dirname(file_path))
+                            except:
+                                pass
                         else:
                             send_whatsapp_message("❌ Failed to download audio. The file may be too large (max 100MB) or unavailable.")
                     else:
@@ -402,8 +423,11 @@ def handle_webhook():
                         file_path, title = download_media(url, quality, format_id)
                         if file_path:
                             send_whatsapp_file(file_path, f"🎥 {title}\nQuality: {quality}", is_video=True)
-                            os.remove(file_path)
-                            os.rmdir(os.path.dirname(file_path))
+                            try:
+                                os.remove(file_path)
+                                os.rmdir(os.path.dirname(file_path))
+                            except:
+                                pass
                         else:
                             send_whatsapp_message("❌ Failed to download media. The file may be too large (max 100MB) or unavailable.")
                 else:
