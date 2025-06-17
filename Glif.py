@@ -20,10 +20,8 @@ GREEN_API = {
     "apiUrl": "https://7105.api.greenapi.com",
     "mediaUrl": "https://7105.media.greenapi.com"
 }
-AUTHORIZED_GROUP = "120363421227499361@g.us"
-ADMIN_NUMBER = "923190779215"  # Only this number can use /reset
+AUTHORIZED_GROUP = "120363421227499361@g.us"  # Changed to group ID
 COOKIES_FILE = "cookies.txt"
-MAX_FILE_SIZE_MB = 100  # 100MB maximum file size
 
 # User session data
 user_sessions = {}
@@ -62,12 +60,6 @@ def send_whatsapp_message(text):
 def send_whatsapp_file(file_path, caption, is_video=False):
     """Send file (video or image) with caption"""
     try:
-        # Check file size
-        file_size = os.path.getsize(file_path) / (1024 * 1024)  # Size in MB
-        if file_size > MAX_FILE_SIZE_MB:
-            logger.warning(f"File too large: {file_size:.2f}MB")
-            return False
-            
         url = f"{GREEN_API['mediaUrl']}/waInstance{GREEN_API['idInstance']}/sendFileByUpload/{GREEN_API['apiToken']}"
         
         with open(file_path, 'rb') as file:
@@ -269,26 +261,29 @@ def download_media(url, quality, format_id=None):
             filename = ydl.prepare_filename(info)
             
             if quality == 'mp3':
-                # Handle audio conversion
-                base, ext = os.path.splitext(filename)
-                mp3_file = base + '.mp3'
+                mp3_file = filename.replace('.webm', '.mp3').replace('.m4a', '.mp3')
                 if os.path.exists(mp3_file):
-                    # Check file size before returning
-                    file_size = os.path.getsize(mp3_file) / (1024 * 1024)
-                    if file_size > MAX_FILE_SIZE_MB:
+                    # Check file size
+                    file_size = os.path.getsize(mp3_file)
+                    if file_size > 100 * 1024 * 1024:  # 100MB limit
+                        logger.error(f"File size {file_size} exceeds 100MB limit")
                         os.remove(mp3_file)
+                        os.rmdir(temp_dir)
                         return None, None
                     return mp3_file, info.get('title', 'audio')
             else:
-                # Handle video files
                 if check_audio(filename):
                     new_filename = f"{os.path.splitext(filename)[0]}_{quality}.mp4"
                     os.rename(filename, new_filename)
-                    # Check file size before returning
-                    file_size = os.path.getsize(new_filename) / (1024 * 1024)
-                    if file_size > MAX_FILE_SIZE_MB:
+                    
+                    # Check file size
+                    file_size = os.path.getsize(new_filename)
+                    if file_size > 100 * 1024 * 1024:  # 100MB limit
+                        logger.error(f"File size {file_size} exceeds 100MB limit")
                         os.remove(new_filename)
+                        os.rmdir(temp_dir)
                         return None, None
+                    
                     return new_filename, info.get('title', 'video')
                 
         return None, None
@@ -298,19 +293,8 @@ def download_media(url, quality, format_id=None):
         return None, None
     finally:
         try:
-            # Clean up temp directory
-            if os.path.exists(temp_dir):
-                for filename in os.listdir(temp_dir):
-                    file_path = os.path.join(temp_dir, filename)
-                    try:
-                        if os.path.isfile(file_path):
-                            os.unlink(file_path)
-                    except Exception as e:
-                        logger.error(f"Error deleting temp file {file_path}: {e}")
-                try:
-                    os.rmdir(temp_dir)
-                except OSError:
-                    pass
+            if os.path.exists(temp_dir) and not os.listdir(temp_dir):
+                os.rmdir(temp_dir)
         except Exception as e:
             logger.warning(f"Error cleaning temp dir: {str(e)}")
 
@@ -354,13 +338,6 @@ def send_quality_options(sender, url):
     
     send_whatsapp_message(options_text)
 
-def reset_bot():
-    """Reset bot state completely"""
-    global user_sessions
-    user_sessions = {}
-    logger.info("Bot has been reset - all user sessions cleared")
-    return True
-
 # ======================
 # WEBHOOK HANDLER
 # ======================
@@ -370,11 +347,11 @@ def handle_webhook():
         data = request.json
         logger.info(f"RAW WEBHOOK DATA:\n{data}")
 
-        # Verify sender is from our authorized group
-        sender_data = data.get('senderData', {})
-        sender = sender_data.get('sender', '')
-        chat_id = sender_data.get('chatId', '')
+        # Verify sender
+        sender = data.get('senderData', {}).get('sender', '')
+        chat_id = data.get('senderData', {}).get('chatId', '')
         
+        # Only process messages from authorized group
         if chat_id != AUTHORIZED_GROUP:
             logger.warning(f"Ignoring message from: {chat_id}")
             return jsonify({'status': 'ignored'}), 200
@@ -395,6 +372,12 @@ def handle_webhook():
 
         logger.info(f"PROCESSING MESSAGE FROM {sender}: {message}")
 
+        # Admin reset command
+        if message.lower() == '/reset':
+            user_sessions.clear()
+            send_whatsapp_message("✅ Bot has been reset. All user sessions cleared.")
+            return jsonify({'status': 'reset'}), 200
+
         # Check if this is a quality selection
         if sender in user_sessions and user_sessions[sender].get('awaiting_quality'):
             try:
@@ -411,25 +394,19 @@ def handle_webhook():
                         file_path, title = download_media(url, 'mp3')
                         if file_path:
                             send_whatsapp_file(file_path, f"🎵 {title}", is_video=False)
-                            try:
-                                os.remove(file_path)
-                                os.rmdir(os.path.dirname(file_path))
-                            except:
-                                pass
+                            os.remove(file_path)
+                            os.rmdir(os.path.dirname(file_path))
                         else:
-                            send_whatsapp_message("❌ Failed to download audio. The file may be too large (max 100MB) or unavailable.")
+                            send_whatsapp_message("❌ Failed to download audio. Video may be too large (>100MB) or unavailable.")
                     else:
                         send_whatsapp_message(f"⬇️ Downloading {quality} quality...")
                         file_path, title = download_media(url, quality, format_id)
                         if file_path:
                             send_whatsapp_file(file_path, f"🎥 {title}\nQuality: {quality}", is_video=True)
-                            try:
-                                os.remove(file_path)
-                                os.rmdir(os.path.dirname(file_path))
-                            except:
-                                pass
+                            os.remove(file_path)
+                            os.rmdir(os.path.dirname(file_path))
                         else:
-                            send_whatsapp_message("❌ Failed to download media. The file may be too large (max 100MB) or unavailable.")
+                            send_whatsapp_message("❌ Failed to download media. Video may be too large (>100MB) or unavailable.")
                 else:
                     send_whatsapp_message("❌ Invalid choice. Please select one of the available options.")
                     # Resend options
@@ -443,43 +420,44 @@ def handle_webhook():
 
         # Command handling
         if message.lower() in ['hi', 'hello', 'hey']:
-            help_text = """👋 *Welcome to Media Downloader Bot*
+            help_text = """
+👋 Welcome to Media Downloader Bot!
 
-Here's what I can do for you:
+To download media:
+1. Send any video URL (YouTube, Instagram, TikTok, etc.)
+2. Select desired quality when prompted
 
-• Simply paste any video URL (YouTube, Instagram, TikTok, Facebook, etc.) to download
-
-• The bot will show available quality options
-
-• Select your preferred quality by replying with the number
-
-• Maximum file size: 100MB
-
-Need help? Type /help"""
+Commands:
+/help - Show this help message
+/reset - Admin only: Reset bot sessions
+            """
             send_whatsapp_message(help_text)
         
         elif message.lower().startswith(('/help', 'help', 'info')):
-            help_text = """ℹ️ *Media Downloader Bot Help*
+            help_text = """
+📋 Media Downloader Bot Help
 
-*How to use:*
-1. Send any video URL (YouTube, Instagram, TikTok, etc.)
-2. The bot will show available quality options
-3. Reply with the number of your choice
-4. Receive your downloaded media
+Supported Platforms:
+- YouTube
+- Instagram
+- TikTok
+- Facebook
+- Twitter
+- Most video sites
 
-*Notes:*
+How to Use:
+1. Send a video URL
+2. Select quality from options
+3. Receive your media
+
+Notes:
 - Maximum file size: 100MB
-- For audio-only, choose MP3 option
-- Some videos may not be available in all qualities
+- Audio-only option available
 
-Admin commands:
-/reset - Reset bot state (admin only)"""
+Admin Commands:
+/reset - Clear all active sessions
+            """
             send_whatsapp_message(help_text)
-        
-        # Admin command
-        elif message.lower() == '/reset' and sender.startswith(f"{ADMIN_NUMBER}@"):
-            reset_bot()
-            send_whatsapp_message("🔄 Bot has been reset to initial state")
         
         # Check if message is a URL
         elif any(proto in message.lower() for proto in ['http://', 'https://']):
@@ -518,9 +496,7 @@ if __name__ == '__main__':
     ============================================
     WhatsApp Media Bot READY
     ONLY responding to group: {AUTHORIZED_GROUP}
-    Admin number: {ADMIN_NUMBER}
     GreenAPI Instance: {GREEN_API['idInstance']}
-    Max file size: {MAX_FILE_SIZE_MB}MB
     ============================================
     """)
     serve(app, host='0.0.0.0', port=8000)
