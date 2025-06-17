@@ -1,130 +1,87 @@
 from flask import Flask, request, jsonify
-from waitress import serve
 import requests
 import logging
-import re
-import time
-import json
 
 app = Flask(__name__)
 
-# Configuration
-GREEN_API = {
-    "idInstance": "7105261536",
-    "apiToken": "13a4bbfd70394a1c862c5d709671333fb1717111737a4f7998",
-    "apiUrl": "https://7105.api.greenapi.com"
-}
+# GreenAPI Configuration
+INSTANCE_ID = "7105261536"
+API_TOKEN = "13a4bbfd70394a1c862c5d709671333fb1717111737a4f7998"
 AUTHORIZED_GROUP = "120363421227499361@g.us"
+GREEN_API_URL = f"https://7105.api.greenapi.com/waInstance{INSTANCE_ID}"
 
 # Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def delete_message(chat_id, message_id):
-    """Delete message using GreenAPI"""
-    url = f"{GREEN_API['apiUrl']}/waInstance{GREEN_API['idInstance']}/deleteMessage/{GREEN_API['apiToken']}"
+def remove_participant(chat_id, participant_id):
+    """Remove participant from group using GreenAPI"""
+    url = f"{GREEN_API_URL}/removeGroupParticipant/{API_TOKEN}"
     payload = {
-        "chatId": chat_id,
-        "idMessage": message_id
+        "groupId": chat_id,
+        "participantId": participant_id
     }
+    headers = {'Content-Type': 'application/json'}
     
     try:
-        # Add delay to ensure message is processed by WhatsApp servers
-        time.sleep(1)
-        
-        headers = {
-            'Content-Type': 'application/json',
-            'Accept': 'application/json'
-        }
-        
-        response = requests.post(
-            url,
-            json=payload,
-            headers=headers,
-            timeout=10
-        )
-        
-        # Handle both JSON and string responses
-        try:
-            error_data = response.json()
-            error_msg = error_data.get('message', str(error_data))
-        except ValueError:
-            error_msg = response.text
-            
-        if response.status_code != 200:
-            logger.error(f"API Error ({response.status_code}): {error_msg}")
-            return False
-            
-        logger.info(f"Successfully deleted message {message_id}")
+        response = requests.post(url, json=payload, headers=headers)
+        response.raise_for_status()
+        logger.info(f"Removed participant {participant_id} from group {chat_id}")
         return True
-        
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Request failed: {str(e)}")
+    except Exception as e:
+        logger.error(f"Failed to remove participant: {str(e)}")
         return False
 
-def contains_url(text):
-    """Improved URL detection"""
-    url_pattern = re.compile(
-        r'http[s]?://(?:[a-zA-Z]|[0-9]|[$-_@.&+]|[!*\\(\\),]|(?:%[0-9a-fA-F][0-9a-fA-F]))+'
-    )
-    return bool(url_pattern.search(text))
-
 @app.route('/webhook', methods=['POST'])
-def handle_webhook():
+def webhook():
     try:
         data = request.json
-        logger.info(f"Incoming message from {data.get('senderData', {}).get('sender', 'unknown')}")
+        logger.info(f"Incoming webhook data: {data}")
 
-        # Verify message is from our authorized group
+        # Check if message is from our authorized group
         sender_data = data.get('senderData', {})
         chat_id = sender_data.get('chatId', '')
         
         if chat_id != AUTHORIZED_GROUP:
+            logger.info(f"Ignoring message from non-authorized chat: {chat_id}")
             return jsonify({'status': 'ignored'}), 200
 
-        # Extract message details
+        # Get sender and message details
+        participant_id = sender_data.get('sender', '')  # The participant to remove
         message_data = data.get('messageData', {})
-        message_id = data.get('idMessage', '')
         
-        # Check for URL in different message types
-        text = ''
+        # Check for URL in message
+        message_text = ""
         if message_data.get('typeMessage') == 'textMessage':
-            text = message_data.get('textMessageData', {}).get('textMessage', '')
+            message_text = message_data.get('textMessageData', {}).get('textMessage', '').lower()
         elif message_data.get('typeMessage') == 'extendedTextMessage':
-            text = message_data.get('extendedTextMessageData', {}).get('text', '')
+            message_text = message_data.get('extendedTextMessageData', {}).get('text', '').lower()
 
-        # If message contains URL, delete it
-        if text and contains_url(text):
-            logger.info(f"URL detected in message {message_id[:6]}...")
-            if delete_message(chat_id, message_id):
-                return jsonify({'status': 'deleted'}), 200
+        # Check if message contains a URL
+        if any(proto in message_text for proto in ['http://', 'https://', 'www.']):
+            logger.info(f"Detected URL in message from {participant_id}")
+            
+            # Remove the participant who sent the URL
+            if remove_participant(chat_id, participant_id):
+                # Notify group (optional)
+                requests.post(
+                    f"{GREEN_API_URL}/sendMessage/{API_TOKEN}",
+                    json={
+                        "chatId": chat_id,
+                        "message": f"⚠️ {participant_id.split('@')[0]} was removed for sharing a link."
+                    },
+                    headers={'Content-Type': 'application/json'}
+                )
+                return jsonify({'status': 'removed'}), 200
             else:
-                logger.warning("Failed to delete message")
-                return jsonify({'status': 'delete_failed'}), 200
+                return jsonify({'status': 'removal_failed'}), 200
 
         return jsonify({'status': 'no_action'}), 200
 
     except Exception as e:
-        logger.error(f"Webhook processing error: {str(e)}", exc_info=True)
+        logger.error(f"Webhook error: {str(e)}")
         return jsonify({'status': 'error'}), 500
 
-@app.route('/')
-def health_check():
-    return jsonify({
-        "status": "active",
-        "authorized_group": AUTHORIZED_GROUP,
-        "function": "URL message deleter",
-        "timestamp": int(time.time())
-    })
-
 if __name__ == '__main__':
-    logger.info(f"""
-    ====================================
-    WhatsApp URL Deleter Bot READY
-    Monitoring group: {AUTHORIZED_GROUP}
-    ====================================
-    """)
-    serve(app, host='0.0.0.0', port=8000)
+    logger.info("Starting URL moderator bot...")
+    app.run(host='0.0.0.0', port=8000)
