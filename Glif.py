@@ -17,6 +17,7 @@ GREEN_API = {
     "mediaUrl": "https://7105.media.greenapi.com"
 }
 AUTHORIZED_GROUP = "120363421227499361@g.us"
+BOT_NUMBER = "13656174559@c.us"  # Add your bot's number here
 
 # ======================
 # LOGGING SETUP
@@ -52,10 +53,15 @@ def extract_message_text(message_data):
         return message_data.get('textMessageData', {}).get('textMessage', '').strip()
     elif message_data.get('typeMessage') == 'extendedTextMessage':
         extended_data = message_data.get('extendedTextMessageData', {})
-        # Check for preview links in extended messages
-        if 'text' in extended_data:
-            return extended_data['text'].strip()
+        return extended_data.get('text', '').strip()
     return ''
+
+def is_url(text):
+    """Check if text contains a URL"""
+    url_pattern = re.compile(
+        r'https?://(?:[-\w.]|(?:%[\da-fA-F]{2}))+[/\w .-]*/?'
+    )
+    return bool(url_pattern.search(text))
 
 @app.route('/webhook', methods=['POST'])
 def handle_webhook():
@@ -63,12 +69,17 @@ def handle_webhook():
         data = request.json
         logger.info(f"RAW WEBHOOK DATA:\n{data}")
 
-        # Verify sender is from our authorized group
+        # Verify sender is from our authorized group and not the bot itself
         sender_data = data.get('senderData', {})
         chat_id = sender_data.get('chatId', '')
+        sender = sender_data.get('sender', '')
         
         if chat_id != AUTHORIZED_GROUP:
             logger.warning(f"Ignoring message from: {chat_id}")
+            return jsonify({'status': 'ignored'}), 200
+            
+        if sender == BOT_NUMBER:
+            logger.info("Ignoring bot's own message")
             return jsonify({'status': 'ignored'}), 200
 
         # Extract message text including preview links
@@ -79,10 +90,13 @@ def handle_webhook():
             logger.warning("Received empty message")
             return jsonify({'status': 'empty_message'}), 200
 
-        logger.info(f"PROCESSING MESSAGE FROM GROUP: {message}")
+        logger.info(f"PROCESSING MESSAGE FROM {sender}: {message}")
 
-        # Simply echo back the message
-        send_whatsapp_message(f"Echo: {message}")
+        # Check if message contains a URL
+        if is_url(message):
+            send_whatsapp_message(f"🔗 URL detected: {message}")
+        else:
+            send_whatsapp_message(f"📝 You said: {message}")
 
         return jsonify({'status': 'processed'})
 
@@ -103,6 +117,7 @@ if __name__ == '__main__':
     ============================================
     WhatsApp Echo Bot READY
     ONLY responding to group: {AUTHORIZED_GROUP}
+    Ignoring messages from: {BOT_NUMBER}
     GreenAPI Instance: {GREEN_API['idInstance']}
     ============================================
     """)
