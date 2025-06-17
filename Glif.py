@@ -20,7 +20,8 @@ GREEN_API = {
     "mediaUrl": "https://7105.media.greenapi.com"
 }
 AUTHORIZED_NUMBER = "923190779215"
-COOKIES_FILE = "cookies.txt"
+COOKIES_FILE = "igcookies.txt"  # Changed to match the downloaded file
+COOKIES_URL = "https://cdn.indexer.eu.org/-1002243289687/125/1750191676/f7ea84a9b1c8dc029c99a473d69bd234ea5103b2158d09a48ad2d160cecbb02d"
 
 # ======================
 # LOGGING SETUP
@@ -31,6 +32,24 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger(__name__)
+
+def download_cookies_file():
+    """Download the Instagram cookies file if it doesn't exist"""
+    if not os.path.exists(COOKIES_FILE):
+        try:
+            logger.info("Downloading Instagram cookies file...")
+            response = requests.get(COOKIES_URL)
+            response.raise_for_status()
+            
+            with open(COOKIES_FILE, 'wb') as f:
+                f.write(response.content)
+                
+            logger.info("Successfully downloaded Instagram cookies")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to download cookies: {str(e)}")
+            return False
+    return True
 
 # ======================
 # CORE FUNCTIONS
@@ -77,8 +96,12 @@ def send_whatsapp_file(file_path, caption):
         return False
 
 def download_instagram_video(url):
-    """Download Instagram video in best quality"""
+    """Download Instagram video in best quality with cookie authentication"""
     try:
+        # Ensure cookies file exists
+        if not download_cookies_file():
+            return None, None
+            
         temp_dir = tempfile.mkdtemp()
         output_path = os.path.join(temp_dir, 'video.mp4')
         
@@ -98,6 +121,10 @@ def download_instagram_video(url):
             'fragment_retries': 3,
             'skip_unavailable_fragments': True,
             'throttledratelimit': 50,
+            'postprocessors': [{
+                'key': 'FFmpegVideoConvertor',
+                'preferedformat': 'mp4',
+            }],
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -105,14 +132,27 @@ def download_instagram_video(url):
             title = info.get('title', 'Instagram video')
             
             # Verify file was downloaded
-            if os.path.exists(output_path):
+            if os.path.exists(output_path) and os.path.getsize(output_path) > 0:
                 return output_path, title
             else:
                 return None, None
                 
+    except yt_dlp.utils.DownloadError as e:
+        if 'login required' in str(e).lower():
+            logger.error("Instagram requires login - cookies may be invalid")
+        else:
+            logger.error(f"Download error: {str(e)}")
+        return None, None
     except Exception as e:
         logger.error(f"Error downloading Instagram video: {str(e)}")
         return None, None
+    finally:
+        # Clean up temp directory if empty
+        try:
+            if os.path.exists(temp_dir) and not os.listdir(temp_dir):
+                os.rmdir(temp_dir)
+        except Exception as e:
+            logger.warning(f"Error cleaning temp dir: {str(e)}")
 
 # ======================
 # WEBHOOK HANDLER
@@ -147,7 +187,7 @@ def handle_webhook():
 
         # Check if message is an Instagram URL
         if 'instagram.com' in message.lower():
-            send_whatsapp_message("⬇️ Downloading Instagram video...")
+            send_whatsapp_message("⬇️ Downloading Instagram video (this may take a moment)...")
             
             # Download the video
             file_path, title = download_instagram_video(message)
@@ -158,12 +198,13 @@ def handle_webhook():
                     # Clean up
                     os.remove(file_path)
                     os.rmdir(os.path.dirname(file_path))
+                    send_whatsapp_message("✅ Video downloaded successfully!")
                 else:
                     send_whatsapp_message("❌ Failed to send video. Please try again.")
             else:
-                send_whatsapp_message("❌ Failed to download video. Instagram may be blocking requests.")
+                send_whatsapp_message("❌ Failed to download video. Instagram may be blocking requests or cookies are invalid.")
         else:
-            send_whatsapp_message("ℹ️ Send me an Instagram video URL to download it")
+            send_whatsapp_message("ℹ️ Please send me an Instagram video URL to download it")
 
         return jsonify({'status': 'processed'})
 
@@ -172,26 +213,14 @@ def handle_webhook():
         return jsonify({'status': 'error'}), 500
 
 # ======================
-# HEALTH CHECK
-# ======================
-@app.route('/')
-def health_check():
-    return jsonify({
-        "status": "active",
-        "authorized_number": AUTHORIZED_NUMBER,
-        "instance_id": GREEN_API['idInstance'],
-        "timestamp": datetime.now().isoformat()
-    })
-
-# ======================
 # START SERVER
 # ======================
 if __name__ == '__main__':
-    # Verify cookies file exists
-    if not os.path.exists(COOKIES_FILE):
-        logger.warning(f"Cookies file not found at: {COOKIES_FILE}")
+    # Download cookies file if needed
+    if download_cookies_file():
+        logger.info("✅ Instagram cookies file ready")
     else:
-        logger.info(f"Using cookies file: {COOKIES_FILE}")
+        logger.warning("❌ Instagram cookies file not available - downloads may fail")
     
     logger.info(f"""
     ============================================
