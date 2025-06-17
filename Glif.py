@@ -20,7 +20,7 @@ GREEN_API = {
     "apiUrl": "https://7105.api.greenapi.com",
     "mediaUrl": "https://7105.media.greenapi.com"
 }
-AUTHORIZED_GROUP = "120363421227499361@g.us"
+AUTHORIZED_NUMBER = "923190779215"
 COOKIES_FILE = "cookies.txt"
 
 # GLIF Configuration
@@ -51,10 +51,10 @@ logger = logging.getLogger(__name__)
 # CORE FUNCTIONS
 # ======================
 def send_whatsapp_message(text):
-    """Send text message to authorized group"""
+    """Send text message to authorized number"""
     url = f"{GREEN_API['apiUrl']}/waInstance{GREEN_API['idInstance']}/sendMessage/{GREEN_API['apiToken']}"
     payload = {
-        "chatId": AUTHORIZED_GROUP,
+        "chatId": f"{AUTHORIZED_NUMBER}@c.us",
         "message": text
     }
     headers = {'Content-Type': 'application/json'}
@@ -62,14 +62,14 @@ def send_whatsapp_message(text):
     try:
         response = requests.post(url, json=payload, headers=headers)
         response.raise_for_status()
-        logger.info(f"Message sent to group: {text[:50]}...")
+        logger.info(f"Message sent: {text[:50]}...")
         return True
     except Exception as e:
-        logger.error(f"Failed to send message to group: {str(e)}")
+        logger.error(f"Failed to send message: {str(e)}")
         return False
 
 def send_whatsapp_file(file_path, caption, is_video=False):
-    """Send file (video or image) with caption to group"""
+    """Send file (video or image) with caption"""
     try:
         url = f"{GREEN_API['mediaUrl']}/waInstance{GREEN_API['idInstance']}/sendFileByUpload/{GREEN_API['apiToken']}"
         
@@ -78,17 +78,17 @@ def send_whatsapp_file(file_path, caption, is_video=False):
                 'file': (os.path.basename(file_path), file, 'video/mp4' if is_video else 'audio/mpeg' if file_path.endswith('.mp3') else 'image/jpeg')
             }
             data = {
-                'chatId': AUTHORIZED_GROUP,
+                'chatId': f"{AUTHORIZED_NUMBER}@c.us",
                 'caption': caption
             }
             
             response = requests.post(url, files=files, data=data)
             response.raise_for_status()
-            logger.info(f"File sent to group with caption: {caption[:50]}...")
+            logger.info(f"File sent with caption: {caption[:50]}...")
             return True
             
     except Exception as e:
-        logger.error(f"File upload to group failed: {str(e)}")
+        logger.error(f"File upload failed: {str(e)}")
         return False
 
 def generate_thumbnail(prompt):
@@ -316,7 +316,7 @@ def download_media(url, quality, format_id=None):
             logger.warning(f"Error cleaning temp dir: {str(e)}")
 
 def send_quality_options(sender, url):
-    """Check available qualities and send options to group"""
+    """Check available qualities and send options to user"""
     send_whatsapp_message("🔍 Checking available video qualities...")
     
     quality_map = get_available_qualities(url)
@@ -364,17 +364,12 @@ def handle_webhook():
         data = request.json
         logger.info(f"RAW WEBHOOK DATA:\n{data}")
 
-        # Verify message is from our authorized group
-        sender_data = data.get('senderData', {})
-        chat_id = sender_data.get('chatId', '')
-        
-        if chat_id != AUTHORIZED_GROUP:
-            logger.warning(f"Ignoring message from: {chat_id}")
+        # Verify sender
+        sender = data.get('senderData', {}).get('sender', '')
+        if not sender.endswith(f"{AUTHORIZED_NUMBER}@c.us"):
+            logger.warning(f"Ignoring message from: {sender}")
             return jsonify({'status': 'ignored'}), 200
 
-        # Extract sender number for session tracking
-        sender = sender_data.get('sender', '')
-        
         # Extract message text
         message_data = data.get('messageData', {})
         if message_data.get('typeMessage') == 'textMessage':
@@ -389,7 +384,7 @@ def handle_webhook():
             logger.warning("Received empty message")
             return jsonify({'status': 'empty_message'}), 200
 
-        logger.info(f"PROCESSING MESSAGE FROM {sender} IN GROUP {AUTHORIZED_GROUP}: {message}")
+        logger.info(f"PROCESSING MESSAGE FROM {AUTHORIZED_NUMBER}: {message}")
 
         # Check if this is a quality selection
         if sender in user_sessions and user_sessions[sender].get('awaiting_quality'):
@@ -406,7 +401,7 @@ def handle_webhook():
                         send_whatsapp_message("⬇️ Downloading MP3 audio...")
                         file_path, title = download_media(url, 'mp3')
                         if file_path:
-                            send_whatsapp_file(file_path, f"🎵 {title}\n(Shared by: {sender.split('@')[0]})", is_video=False)
+                            send_whatsapp_file(file_path, f"🎵 {title}", is_video=False)
                             os.remove(file_path)
                             os.rmdir(os.path.dirname(file_path))
                         else:
@@ -415,7 +410,7 @@ def handle_webhook():
                         send_whatsapp_message(f"⬇️ Downloading {quality} quality...")
                         file_path, title = download_media(url, quality, format_id)
                         if file_path:
-                            send_whatsapp_file(file_path, f"🎥 {title}\nQuality: {quality}\n(Shared by: {sender.split('@')[0]})", is_video=True)
+                            send_whatsapp_file(file_path, f"🎥 {title}\nQuality: {quality}", is_video=True)
                             os.remove(file_path)
                             os.rmdir(os.path.dirname(file_path))
                         else:
@@ -458,7 +453,7 @@ Paste any video URL (YouTube, Instagram, TikTok, Facebook, etc.) to download
                     with open(temp_file, 'wb') as f:
                         f.write(response.content)
                     # Send as file with caption
-                    send_whatsapp_file(temp_file, f"🎨 Thumbnail for: {prompt}\n(Requested by: {sender.split('@')[0]})")
+                    send_whatsapp_file(temp_file, f"🎨 Thumbnail for: {prompt}")
                     send_whatsapp_message(f"🔗 Direct URL: {result['image_url']}")
                     os.remove(temp_file)
                 else:
@@ -481,7 +476,7 @@ Paste any video URL (YouTube, Instagram, TikTok, Facebook, etc.) to download
 def health_check():
     return jsonify({
         "status": "active",
-        "authorized_group": AUTHORIZED_GROUP,
+        "authorized_number": AUTHORIZED_NUMBER,
         "instance_id": GREEN_API['idInstance'],
         "timestamp": datetime.now().isoformat()
     })
@@ -499,7 +494,7 @@ if __name__ == '__main__':
     logger.info(f"""
     ============================================
     WhatsApp Media Bot READY
-    ONLY responding to group: {AUTHORIZED_GROUP}
+    ONLY responding to: {AUTHORIZED_NUMBER}
     GreenAPI Instance: {GREEN_API['idInstance']}
     ============================================
     """)
