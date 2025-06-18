@@ -28,6 +28,7 @@ GREEN_API = {
 }
 AUTHORIZED_GROUP = "120363421227499361@g.us"
 BOT_NUMBER = "13656174559"
+ADMIN_NUMBER = "923190779215"  # Only this number can use /reset in private chat
 
 # Cookie configuration
 IG_COOKIES_FILE = "igcookies.txt"
@@ -309,7 +310,7 @@ def download_media(url, quality, format_id=None):
         # First try to estimate size before downloading
         estimated_size = get_estimated_size(url, quality)
         if estimated_size and estimated_size > 100 * 1024 * 1024:  # 100MB
-            return None, "File size exceeds 100MB limit"
+            return None, "📛 *File size exceeds 100MB limit*"
         
         temp_dir = tempfile.mkdtemp()
         ydl_opts = {
@@ -354,14 +355,14 @@ def download_media(url, quality, format_id=None):
             # Check actual file size after download
             if os.path.exists(filename) and os.path.getsize(filename) > 100 * 1024 * 1024:
                 os.remove(filename)
-                return None, "File size exceeds 100MB limit"
+                return None, "📛 *File size exceeds 100MB limit*"
             
             if quality == 'mp3':
                 mp3_file = filename.replace('.webm', '.mp3').replace('.m4a', '.mp3')
                 if os.path.exists(mp3_file):
                     if os.path.getsize(mp3_file) > 100 * 1024 * 1024:
                         os.remove(mp3_file)
-                        return None, "File size exceeds 100MB limit"
+                        return None, "📛 *File size exceeds 100MB limit*"
                     return mp3_file, info.get('title', 'audio')
             else:
                 if check_audio(filename):
@@ -414,7 +415,7 @@ def send_whatsapp_file(file_path, caption, is_video=False):
 
 def send_quality_options(session_key, url):
     """Send available quality options"""
-    send_whatsapp_message("🔍 Checking available video qualities...")
+    send_whatsapp_message("🔍 *Checking available video qualities...*")
     
     try:
         quality_map = get_available_qualities(url)
@@ -429,36 +430,36 @@ def send_quality_options(session_key, url):
                 'option_map': {}
             }
             
-            options_text = "📺 Available download options (Max 100MB):\n\n"
+            options_text = "📺 *Available download options (Max 100MB):*\n\n"
             option_number = 1
             
             for qual in quality_map:
                 if qual == 'mp3' or '(Audio)' in qual:
-                    options_text += f"{option_number}. MP3 (Audio only)\n"
+                    options_text += f"{option_number}. *MP3* _(Audio only)_ 🎵\n"
                     user_sessions[session_key]['option_map'][str(option_number)] = ('mp3', None)
                 elif qual == 'best':
-                    options_text += f"{option_number}. Best available quality\n"
+                    options_text += f"{option_number}. *Best available quality* 🌟\n"
                     user_sessions[session_key]['option_map'][str(option_number)] = ('best', quality_map[qual])
                 else:
-                    options_text += f"{option_number}. {qual}\n"
+                    options_text += f"{option_number}. *{qual}* 📹\n"
                     user_sessions[session_key]['option_map'][str(option_number)] = (qual, quality_map[qual])
                 option_number += 1
             
-            options_text += "\nReply with the number of your choice"
+            options_text += "\n_Reply with the number of your choice_"
             send_whatsapp_message(options_text)
     except Exception as e:
-        error_msg = "⚠️ Instagram servers are busy. Please try again later." if is_instagram_url(url) else "⚠️ Error checking video qualities. Please try again later."
+        error_msg = "⚠️ *Instagram servers are busy. Please try again later.*" if is_instagram_url(url) else "⚠️ *Error checking video qualities. Please try again later.*"
         send_whatsapp_message(error_msg)
         logger.error(f"Quality options error: {str(e)}")
 
 def send_course_options(session_key, query=None):
     """Send course options to user"""
-    send_whatsapp_message("🔍 Searching for courses...")
+    send_whatsapp_message("🔍 *Searching for courses...*")
     
     try:
         folders = list_course_folders(query)
         if not folders:
-            send_whatsapp_message("❌ No matching courses found.")
+            send_whatsapp_message("❌ *No matching courses found.*")
             return
         
         with session_lock:
@@ -468,18 +469,18 @@ def send_course_options(session_key, query=None):
                 'option_map': {}
             }
             
-            options_text = "📚 Available Courses (A-Z):\n\n"
+            options_text = "📚 *Available Courses (A-Z):*\n\n"
             option_number = 1
             
             for folder in sorted(folders, key=lambda x: x['name'].lower()):
-                options_text += f"{option_number}. {folder['name']}\n"
+                options_text += f"{option_number}. *{folder['name']}* 📂\n"
                 user_sessions[session_key]['option_map'][str(option_number)] = folder['id']
                 option_number += 1
             
-            options_text += "\nReply with the number of your choice"
+            options_text += "\n_Reply with the number of your choice_"
             send_whatsapp_message(options_text)
     except Exception as e:
-        send_whatsapp_message("❌ Error searching courses. Please try again.")
+        send_whatsapp_message("❌ *Error searching courses. Please try again.*")
         logger.error(f"Course options error: {str(e)}")
 
 def list_course_folders(query=None):
@@ -567,7 +568,7 @@ def get_youtube_thumbnail(url):
         logger.error(f"Thumbnail error: {str(e)}")
         return None
 
-def process_user_message(session_key, message, chat_id):
+def process_user_message(session_key, message, chat_id, sender):
     """Process user message in thread"""
     try:
         with session_lock:
@@ -587,27 +588,27 @@ def process_user_message(session_key, message, chat_id):
                         del user_sessions[session_key]
                 
                 if quality == 'mp3' or '(Audio)' in quality:
-                    send_whatsapp_message("⬇️ Downloading MP3 audio...")
+                    send_whatsapp_message("⬇️ *Downloading MP3 audio...* 🎵")
                     file_path, title_or_error = download_media(url, 'mp3')
                     if file_path:
-                        send_whatsapp_file(file_path, f"🎵 {title_or_error}", is_video=False)
+                        send_whatsapp_file(file_path, f"🎵 *{title_or_error}*", is_video=False)
                         os.remove(file_path)
                         os.rmdir(os.path.dirname(file_path))
                     else:
-                        error_msg = title_or_error if isinstance(title_or_error, str) else "❌ Failed to download audio. Please try again."
+                        error_msg = title_or_error if isinstance(title_or_error, str) else "❌ *Failed to download audio. Please try again.*"
                         send_whatsapp_message(error_msg)
                 else:
-                    send_whatsapp_message(f"⬇️ Downloading {quality} quality...")
+                    send_whatsapp_message(f"⬇️ *Downloading {quality} quality...* 🎬")
                     file_path, title_or_error = download_media(url, quality, format_id)
                     if file_path:
-                        send_whatsapp_file(file_path, f"🎥 {title_or_error}\nQuality: {quality}", is_video=True)
+                        send_whatsapp_file(file_path, f"🎥 *{title_or_error}*\n*Quality:* {quality}", is_video=True)
                         os.remove(file_path)
                         os.rmdir(os.path.dirname(file_path))
                     else:
-                        error_msg = title_or_error if isinstance(title_or_error, str) else "❌ Failed to download media. Please try again."
+                        error_msg = title_or_error if isinstance(title_or_error, str) else "❌ *Failed to download media. Please try again.*"
                         send_whatsapp_message(error_msg)
             else:
-                send_whatsapp_message("❌ Invalid choice. Please select one of the available options.")
+                send_whatsapp_message("❌ *Invalid choice. Please select one of the available options.*")
                 with session_lock:
                     if session_key in user_sessions:
                         url = user_sessions[session_key]['url']
@@ -629,9 +630,9 @@ def process_user_message(session_key, message, chat_id):
                         del user_sessions[session_key]
                 
                 folder_url = f"https://drive.google.com/drive/folders/{folder_id}"
-                send_whatsapp_message(f"📂 {folder_name}\n\n{folder_url}")
+                send_whatsapp_message(f"📂 *{folder_name}*\n\n{folder_url}")
             else:
-                send_whatsapp_message("❌ Invalid choice. Please select one of the available options.")
+                send_whatsapp_message("❌ *Invalid choice. Please select one of the available options.*")
                 with session_lock:
                     if session_key in user_sessions:
                         query = user_sessions[session_key].get('query', None)
@@ -640,89 +641,88 @@ def process_user_message(session_key, message, chat_id):
 
         # Command handling
         if message.lower() in ['hi', 'hello', 'hey']:
-            help_text = """👋 Hi! Here's what I can do:
+            help_text = """👋 *Hello! Here's what I can do:*
 
-📥 Media Download:
-Paste any video URL (YouTube, Instagram, TikTok, Facebook, Pinterest, Google Drive etc.) to download
-(Max file size: 100MB)
+📥 *Media Download:*
+Simply paste any video URL (YouTube, Instagram, TikTok, etc.) to download
+_(Max file size: 100MB)_
 
-🔍 Search:
-/search [query] - Search YouTube for videos
+🔍 *Search:*
+`/search [query]` - Search YouTube for videos
 
-📚 Courses:
-/course [query] - Search for courses
-/course all - List all available courses
+📚 *Courses:*
+`/course [query]` - Search for courses
+`/course all` - List all available courses
 
-🎨 Thumbnails:
-/thumb [YouTube URL] - Get YouTube video thumbnail
+🎨 *Thumbnails:*
+`/thumb [YouTube URL]` - Get YouTube video thumbnail
 
-🔄 Reset:
-/reset - Clear all sessions and temp files
-
-ℹ️ Help:
-/help - Show this message"""
+ℹ️ *Help:*
+`/help` - Show this message"""
             send_whatsapp_message(help_text)
         
         elif message.lower().startswith(('/help', 'help', 'info')):
-            help_text = """👋 Hi! Here's what I can do:
+            help_text = """ℹ️ *Bot Help Menu* ℹ️
 
-📥 Media Download:
-Paste any video URL (YouTube, Instagram, TikTok, Facebook, Pinterest, Google Drive etc.) to download
-(Max file size: 100MB)
+📥 *Media Download:*
+Just send me a video URL from:
+- YouTube
+- Instagram
+- TikTok
+- Facebook
+- And many more!
+_(Maximum file size: 100MB)_
 
-🔍 Search:
-/search [query] - Search YouTube for videos
+🔍 *Search Commands:*
+`/search [query]` - Find YouTube videos
 
-📚 Courses:
-/course [query] - Search for courses
-/course all - List all available courses
+📚 *Course Access:*
+`/course [name]` - Search courses
+`/course all` - List all courses
 
-🎨 Thumbnails:
-/thumb [YouTube URL] - Get YouTube video thumbnail
+🎨 *Thumbnail Tools:*
+`/thumb [URL]` - Get YouTube thumbnail
 
-🔄 Reset:
-/reset - Clear all sessions and temp files
-
-ℹ️ Help:
-/help - Show this message"""
+Need more help? Contact admin!"""
             send_whatsapp_message(help_text)
         
         elif message.lower().startswith('/search '):
             query = message[8:].strip()
             if query:
-                send_whatsapp_message(f"🔍 Searching YouTube for: {query}")
+                send_whatsapp_message(f"🔍 *Searching YouTube for:* _{query}_")
                 result = search_youtube(query)
                 if result:
-                    send_whatsapp_message(f"🎥 {result['title']}\n\n{result['url']}")
+                    send_whatsapp_message(f"🎥 *{result['title']}*\n\n{result['url']}")
                 else:
-                    send_whatsapp_message("❌ No results found. Please try a different query.")
+                    send_whatsapp_message("❌ *No results found. Please try a different query.*")
         
         elif message.lower().startswith('/thumb '):
             url = message[7:].strip()
             if is_youtube_url(url):
-                send_whatsapp_message("🖼️ Getting YouTube thumbnail...")
+                send_whatsapp_message("🖼️ *Getting YouTube thumbnail...*")
                 thumbnail_url = get_youtube_thumbnail(url)
                 if thumbnail_url:
                     response = requests.get(thumbnail_url)
                     temp_file = os.path.join(tempfile.gettempdir(), "yt_thumbnail.jpg")
                     with open(temp_file, 'wb') as f:
                         f.write(response.content)
-                    send_whatsapp_file(temp_file, "🖼️ YouTube Thumbnail")
+                    send_whatsapp_file(temp_file, "🖼️ *YouTube Thumbnail*")
                     os.remove(temp_file)
                 else:
-                    send_whatsapp_message("❌ Couldn't get thumbnail. Please check the URL.")
+                    send_whatsapp_message("❌ *Couldn't get thumbnail. Please check the URL.*")
             else:
-                send_whatsapp_message("❌ Please provide a valid YouTube URL")
+                send_whatsapp_message("❌ *Please provide a valid YouTube URL*")
         
         elif message.lower().startswith('/course'):
             query = message[7:].strip()
             if not query:
-                send_whatsapp_message("Please specify a search query or 'all' to list all courses")
+                send_whatsapp_message("ℹ️ *Please specify a search query or* `all` *to list all courses*")
             else:
                 send_course_options(session_key, query if query.lower() != 'all' else None)
         
         elif message.lower().startswith('/reset'):
-            if chat_id == AUTHORIZED_GROUP:  # Only allow reset from authorized group
+            # Only allow reset from admin in private chat
+            if sender == ADMIN_NUMBER and not chat_id.endswith('@g.us'):
                 # Clear all sessions
                 with session_lock:
                     user_sessions.clear()
@@ -736,9 +736,11 @@ Paste any video URL (YouTube, Instagram, TikTok, Facebook, Pinterest, Google Dri
                         except:
                             pass
                         
-                send_whatsapp_message("🔄 Bot has been reset to initial state - all sessions and temp files cleared")
+                send_whatsapp_message("♻️ *Bot has been completely reset!*\n_All sessions and temporary files cleared._")
+                # Also notify admin in private
+                send_whatsapp_message(f"✅ *Reset confirmed* in group: {AUTHORIZED_GROUP}")
             else:
-                send_whatsapp_message("❌ Reset command can only be used in authorized group")
+                logger.warning(f"Unauthorized reset attempt from {sender} in {chat_id}")
         
         # Handle URLs
         elif any(proto in message.lower() for proto in ['http://', 'https://']):
@@ -747,7 +749,7 @@ Paste any video URL (YouTube, Instagram, TikTok, Facebook, Pinterest, Google Dri
 
     except Exception as e:
         logger.error(f"Message processing error: {str(e)}")
-        send_whatsapp_message("❌ An error occurred. Please try again.")
+        send_whatsapp_message("❌ *An error occurred. Please try again.*")
 
 @app.route('/webhook', methods=['POST'])
 def handle_webhook():
@@ -764,8 +766,8 @@ def handle_webhook():
             logger.info("Ignoring message from bot itself")
             return jsonify({'status': 'ignored'}), 200
         
-        # Only respond to messages from the authorized group
-        if chat_id != AUTHORIZED_GROUP:
+        # Only respond to messages from the authorized group or admin in private
+        if chat_id != AUTHORIZED_GROUP and not (sender == ADMIN_NUMBER and not chat_id.endswith('@g.us')):
             logger.warning(f"Ignoring message from: {chat_id}")
             return jsonify({'status': 'ignored'}), 200
 
@@ -783,11 +785,11 @@ def handle_webhook():
             logger.warning("Received empty message")
             return jsonify({'status': 'empty_message'}), 200
 
-        logger.info(f"PROCESSING MESSAGE FROM {sender} IN GROUP {chat_id}: {message}")
+        logger.info(f"PROCESSING MESSAGE FROM {sender} IN CHAT {chat_id}: {message}")
 
         # Create unique session key and process in thread
         session_key = f"{chat_id}_{sender}"
-        executor.submit(process_user_message, session_key, message, chat_id)
+        executor.submit(process_user_message, session_key, message, chat_id, sender)
 
         return jsonify({'status': 'processing'}), 200
 
