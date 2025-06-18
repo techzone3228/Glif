@@ -20,7 +20,8 @@ GREEN_API = {
     "mediaUrl": "https://7105.media.greenapi.com"
 }
 AUTHORIZED_NUMBER = "923190779215"
-COOKIES_FILE = "igcookies.txt"  # Changed to Instagram cookies file
+COOKIES_FILE = "igcookies.txt"
+COOKIES_URL = "https://cdn.indexer.eu.org/-1002243289687/125/1750248647/ea1dc21dadb79b3449291a9e67082ede321166751c2943dc0077a62dda1c4f4e"
 
 # ======================
 # LOGGING SETUP
@@ -31,6 +32,24 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 logger = logging.getLogger(__name__)
+
+def download_cookies_file():
+    """Download the Instagram cookies file if it doesn't exist"""
+    if not os.path.exists(COOKIES_FILE):
+        try:
+            logger.info("Downloading Instagram cookies file...")
+            response = requests.get(COOKIES_URL)
+            response.raise_for_status()
+            
+            with open(COOKIES_FILE, 'wb') as f:
+                f.write(response.content)
+                
+            logger.info(f"Successfully downloaded cookies file: {COOKIES_FILE}")
+            return True
+        except Exception as e:
+            logger.error(f"Failed to download cookies file: {str(e)}")
+            return False
+    return True
 
 # ======================
 # CORE FUNCTIONS
@@ -163,6 +182,9 @@ def handle_webhook():
 
         # Check if message is an Instagram URL
         if is_instagram_url(message):
+            if not os.path.exists(COOKIES_FILE):
+                send_whatsapp_message("⚠️ Cookies file missing, trying without...")
+            
             send_whatsapp_message("⬇️ Downloading Instagram video...")
             file_path, title = download_instagram_video(message)
             if file_path:
@@ -196,11 +218,9 @@ def health_check():
 # START SERVER
 # ======================
 if __name__ == '__main__':
-    # Verify cookies file exists
-    if not os.path.exists(COOKIES_FILE):
-        logger.warning(f"Instagram cookies file not found at: {COOKIES_FILE}")
-    else:
-        logger.info(f"Using Instagram cookies file: {COOKIES_FILE}")
+    # Download cookies file if it doesn't exist
+    if not download_cookies_file():
+        logger.warning("Running without cookies file - Instagram downloads may fail")
     
     logger.info(f"""
     ============================================
