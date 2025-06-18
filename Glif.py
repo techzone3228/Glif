@@ -766,11 +766,6 @@ def handle_webhook():
             logger.info("Ignoring message from bot itself")
             return jsonify({'status': 'ignored'}), 200
         
-        # Only respond to messages from the authorized group or admin in private
-        if chat_id != AUTHORIZED_GROUP and not (sender == ADMIN_NUMBER and not chat_id.endswith('@g.us')):
-            logger.warning(f"Ignoring message from: {chat_id}")
-            return jsonify({'status': 'ignored'}), 200
-
         # Get message content
         message_data = data.get('messageData', {})
         if message_data.get('typeMessage') == 'textMessage':
@@ -786,6 +781,29 @@ def handle_webhook():
             return jsonify({'status': 'empty_message'}), 200
 
         logger.info(f"PROCESSING MESSAGE FROM {sender} IN CHAT {chat_id}: {message}")
+
+        # Handle reset command from admin in private chat
+        if message.lower().startswith('/reset') and sender == ADMIN_NUMBER and not chat_id.endswith('@g.us'):
+            # Clear all sessions
+            with session_lock:
+                user_sessions.clear()
+                
+            # Clean up temp files
+            temp_dir = tempfile.gettempdir()
+            for filename in os.listdir(temp_dir):
+                if filename.startswith(('yt_thumbnail', 'tmp')):
+                    try:
+                        os.remove(os.path.join(temp_dir, filename))
+                    except:
+                        pass
+                    
+            send_whatsapp_message("♻️ *Bot has been completely reset!*\n_All sessions and temporary files cleared._")
+            return jsonify({'status': 'reset_complete'}), 200
+        
+        # Only respond to other messages in the authorized group
+        if chat_id != AUTHORIZED_GROUP:
+            logger.warning(f"Ignoring message from: {chat_id}")
+            return jsonify({'status': 'ignored'}), 200
 
         # Create unique session key and process in thread
         session_key = f"{chat_id}_{sender}"
