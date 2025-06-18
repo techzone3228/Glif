@@ -21,9 +21,7 @@ GREEN_API = {
     "mediaUrl": "https://7105.media.greenapi.com"
 }
 AUTHORIZED_GROUP = "120363421227499361@g.us"
-ADMIN_NUMBER = "923190779215"  # Only this number can use /reset
 COOKIES_FILE = "cookies.txt"
-MAX_FILE_SIZE_MB = 100  # 100MB maximum file size
 
 # User session data
 user_sessions = {}
@@ -62,12 +60,6 @@ def send_whatsapp_message(text):
 def send_whatsapp_file(file_path, caption, is_video=False):
     """Send file (video or image) with caption"""
     try:
-        # Check file size
-        file_size = os.path.getsize(file_path) / (1024 * 1024)  # Size in MB
-        if file_size > MAX_FILE_SIZE_MB:
-            logger.warning(f"File too large: {file_size:.2f}MB")
-            return False
-            
         url = f"{GREEN_API['mediaUrl']}/waInstance{GREEN_API['idInstance']}/sendFileByUpload/{GREEN_API['apiToken']}"
         
         with open(file_path, 'rb') as file:
@@ -268,12 +260,6 @@ def download_media(url, quality, format_id=None):
             info = ydl.extract_info(url, download=True)
             filename = ydl.prepare_filename(info)
             
-            # Check file size before proceeding
-            file_size = os.path.getsize(filename) / (1024 * 1024)  # Size in MB
-            if file_size > MAX_FILE_SIZE_MB:
-                logger.warning(f"File too large: {file_size:.2f}MB")
-                return None, None
-            
             if quality == 'mp3':
                 mp3_file = filename.replace('.webm', '.mp3').replace('.m4a', '.mp3')
                 if os.path.exists(mp3_file):
@@ -336,13 +322,6 @@ def send_quality_options(sender, url):
     
     send_whatsapp_message(options_text)
 
-def reset_bot():
-    """Reset bot state completely"""
-    global user_sessions
-    user_sessions = {}
-    logger.info("Bot has been reset - all user sessions cleared")
-    return True
-
 # ======================
 # WEBHOOK HANDLER
 # ======================
@@ -353,10 +332,8 @@ def handle_webhook():
         logger.info(f"RAW WEBHOOK DATA:\n{data}")
 
         # Verify sender is from our authorized group
-        sender_data = data.get('senderData', {})
-        sender = sender_data.get('sender', '')
-        chat_id = sender_data.get('chatId', '')
-        
+        sender = data.get('senderData', {}).get('sender', '')
+        chat_id = data.get('senderData', {}).get('chatId', '')
         if chat_id != AUTHORIZED_GROUP:
             logger.warning(f"Ignoring message from: {chat_id}")
             return jsonify({'status': 'ignored'}), 200
@@ -375,7 +352,7 @@ def handle_webhook():
             logger.warning("Received empty message")
             return jsonify({'status': 'empty_message'}), 200
 
-        logger.info(f"PROCESSING MESSAGE FROM {sender}: {message}")
+        logger.info(f"PROCESSING MESSAGE FROM {sender} IN GROUP {chat_id}: {message}")
 
         # Check if this is a quality selection
         if sender in user_sessions and user_sessions[sender].get('awaiting_quality'):
@@ -396,7 +373,7 @@ def handle_webhook():
                             os.remove(file_path)
                             os.rmdir(os.path.dirname(file_path))
                         else:
-                            send_whatsapp_message("❌ Failed to download audio. The file may be too large (max 100MB) or unavailable.")
+                            send_whatsapp_message("❌ Failed to download audio. Please try again.")
                     else:
                         send_whatsapp_message(f"⬇️ Downloading {quality} quality...")
                         file_path, title = download_media(url, quality, format_id)
@@ -405,7 +382,7 @@ def handle_webhook():
                             os.remove(file_path)
                             os.rmdir(os.path.dirname(file_path))
                         else:
-                            send_whatsapp_message("❌ Failed to download media. The file may be too large (max 100MB) or unavailable.")
+                            send_whatsapp_message("❌ Failed to download media. Please try again.")
                 else:
                     send_whatsapp_message("❌ Invalid choice. Please select one of the available options.")
                     # Resend options
@@ -419,43 +396,16 @@ def handle_webhook():
 
         # Command handling
         if message.lower() in ['hi', 'hello', 'hey']:
-            help_text = """👋 *Welcome to Media Downloader Bot*
-
-Here's what I can do for you:
-
-• Simply paste any video URL (YouTube, Instagram, TikTok, Facebook, etc.) to download
-
-• The bot will show available quality options
-
-• Select your preferred quality by replying with the number
-
-• Maximum file size: 100MB
-
-Need help? Type /help"""
+            help_text = """👋 Hi! Here's what I can do:
+Paste any video URL (YouTube, Instagram, TikTok, Facebook, etc.) to download
+/help - Show this message"""
             send_whatsapp_message(help_text)
         
         elif message.lower().startswith(('/help', 'help', 'info')):
-            help_text = """ℹ️ *Media Downloader Bot Help*
-
-*How to use:*
-1. Send any video URL (YouTube, Instagram, TikTok, etc.)
-2. The bot will show available quality options
-3. Reply with the number of your choice
-4. Receive your downloaded media
-
-*Notes:*
-- Maximum file size: 100MB
-- For audio-only, choose MP3 option
-- Some videos may not be available in all qualities
-
-Admin commands:
-/reset - Reset bot state (admin only)"""
+            help_text = """ℹ️ Available Commands:
+Paste any video URL (YouTube, Instagram, TikTok, Facebook, etc.) to download
+/help - Show this message"""
             send_whatsapp_message(help_text)
-        
-        # Admin command
-        elif message.lower() == '/reset' and sender.startswith(f"{ADMIN_NUMBER}@"):
-            reset_bot()
-            send_whatsapp_message("🔄 Bot has been reset to initial state")
         
         # Check if message is a URL
         elif any(proto in message.lower() for proto in ['http://', 'https://']):
@@ -476,8 +426,7 @@ def health_check():
         "status": "active",
         "authorized_group": AUTHORIZED_GROUP,
         "instance_id": GREEN_API['idInstance'],
-        "timestamp": datetime.now().isoformat(),
-        "active_sessions": len(user_sessions)
+        "timestamp": datetime.now().isoformat()
     })
 
 # ======================
@@ -494,9 +443,7 @@ if __name__ == '__main__':
     ============================================
     WhatsApp Media Bot READY
     ONLY responding to group: {AUTHORIZED_GROUP}
-    Admin number: {ADMIN_NUMBER}
     GreenAPI Instance: {GREEN_API['idInstance']}
-    Max file size: {MAX_FILE_SIZE_MB}MB
     ============================================
     """)
     serve(app, host='0.0.0.0', port=8000)
