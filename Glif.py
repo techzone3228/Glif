@@ -8,10 +8,12 @@ import os
 import tempfile
 import subprocess
 import re
+import threading
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
+from concurrent.futures import ThreadPoolExecutor
 
 app = Flask(__name__)
 
@@ -25,6 +27,7 @@ GREEN_API = {
     "mediaUrl": "https://7105.media.greenapi.com"
 }
 AUTHORIZED_GROUP = "120363421227499361@g.us"
+BOT_NUMBER = "+13656174559"
 
 # Cookie configuration
 IG_COOKIES_FILE = "igcookies.txt"
@@ -38,8 +41,12 @@ TOKEN_FILE = "token.json"
 TOKEN_DRIVE_URL = "https://drive.google.com/uc?export=download&id=14p_O13T1GFyZncJw3pPRYTi2jF2bh9bO"
 SCOPES = ['https://www.googleapis.com/auth/drive']
 
-# User session data - using sender+chat_id as unique key
+# Thread pool for concurrent processing
+executor = ThreadPoolExecutor(max_workers=10)
+
+# Thread-safe session management
 user_sessions = {}
+session_lock = threading.Lock()
 
 # ======================
 # LOGGING SETUP
@@ -51,16 +58,11 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ======================
-# HELPER FUNCTIONS
-# ======================
 def download_file(url, filename):
     """Download file from Google Drive"""
     try:
-        session = requests.Session()
-        response = session.get(url, stream=True)
+        response = requests.get(url, stream=True)
         response.raise_for_status()
-        
         with open(filename, 'wb') as f:
             for chunk in response.iter_content(chunk_size=8192):
                 if chunk:
@@ -80,18 +82,16 @@ def ensure_files():
         download_file(TOKEN_DRIVE_URL, TOKEN_FILE)
 
 def get_drive_service():
-    """Authenticate and return Google Drive service using existing token"""
+    """Authenticate and return Google Drive service"""
     try:
         creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
-        
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
             with open(TOKEN_FILE, 'w') as token:
                 token.write(creds.to_json())
-        
         return build('drive', 'v3', credentials=creds)
     except Exception as e:
-        logger.error(f"Error authenticating with Google Drive: {str(e)}")
+        logger.error(f"Drive auth error: {str(e)}")
         return None
 
 def is_youtube_url(url):
@@ -103,7 +103,7 @@ def is_instagram_url(url):
     return 'instagram.com' in url or 'instagr.am' in url
 
 def get_cookies_for_url(url):
-    """Determine which cookies file to use based on URL"""
+    """Get appropriate cookies file for URL"""
     if is_youtube_url(url):
         return YT_COOKIES_FILE if os.path.exists(YT_COOKIES_FILE) else None
     elif is_instagram_url(url):
@@ -120,33 +120,28 @@ def check_audio(filename):
         )
         return "codec_type=audio" in result.stdout
     except Exception as e:
-        logger.error(f"Error checking audio: {str(e)}")
+        logger.error(f"Audio check error: {str(e)}")
         return False
 
-# ======================
-# VIDEO QUALITY FUNCTIONS
-# ======================
 def get_available_qualities(url):
-    """Check available qualities for videos with improved error handling"""
+    """Get available qualities for URL"""
     try:
         if is_youtube_url(url):
             return get_youtube_qualities(url)
         elif is_instagram_url(url):
             return get_instagram_qualities(url)
-        else:
-            return get_other_platform_qualities(url)
+        return get_other_platform_qualities(url)
     except Exception as e:
-        logger.error(f"Error checking available qualities: {str(e)}")
+        logger.error(f"Quality check error: {str(e)}")
         return None
 
 def get_youtube_qualities(url):
-    """Get YouTube-specific quality options"""
+    """Get YouTube quality options"""
     try:
         ydl_opts = {
             'quiet': True,
             'no_warnings': True,
             'extract_flat': False,
-            'force_generic_extractor': True,
             'cookiefile': YT_COOKIES_FILE if os.path.exists(YT_COOKIES_FILE) else None
         }
         
@@ -155,31 +150,21 @@ def get_youtube_qualities(url):
             if not info or 'formats' not in info:
                 return None
             
-            formats = info.get('formats', [])
             quality_map = {}
-            
-            for fmt in formats:
+            for fmt in info.get('formats', []):
                 if fmt.get('vcodec') != 'none':
                     height = fmt.get('height', 0)
-                    if height >= 1080:
-                        quality_map['1080p'] = fmt['format_id']
-                    if height >= 720:
-                        quality_map['720p'] = fmt['format_id']
-                    if height >= 480:
-                        quality_map['480p'] = fmt['format_id']
-                    if height >= 360:
-                        quality_map['360p'] = fmt['format_id']
-                    if height >= 144:
-                        quality_map['144p'] = fmt['format_id']
+                    if height >= 1080: quality_map['1080p'] = fmt['format_id']
+                    if height >= 720: quality_map['720p'] = fmt['format_id']
+                    if height >= 480: quality_map['480p'] = fmt['format_id']
+                    if height >= 360: quality_map['360p'] = fmt['format_id']
+                    if height >= 144: quality_map['144p'] = fmt['format_id']
             
             quality_map['best'] = 'bestvideo+bestaudio/best'
             quality_map['mp3'] = 'bestaudio/best'
-            
-            resolution_order = ['144p', '360p', '480p', '720p', '1080p', 'best', 'mp3']
-            return {q: quality_map[q] for q in resolution_order if q in quality_map}
-            
+            return {q: quality_map[q] for q in ['144p', '360p', '480p', '720p', '1080p', 'best', 'mp3'] if q in quality_map}
     except Exception as e:
-        logger.error(f"Error checking YouTube qualities: {str(e)}")
+        logger.error(f"YouTube quality error: {str(e)}")
         return None
 
 def get_instagram_qualities(url):
@@ -189,63 +174,51 @@ def get_instagram_qualities(url):
             'quiet': True,
             'no_warnings': True,
             'extract_flat': False,
-            'force_generic_extractor': True,
             'cookiefile': IG_COOKIES_FILE if os.path.exists(IG_COOKIES_FILE) else None
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
-            
-            # Check for Instagram rate limiting
             if info and info.get('is_live'):
                 raise Exception("Instagram rate limit reached")
             
             if not info or 'formats' not in info:
                 return None
                 
-            formats = info.get('formats', [])
             quality_map = {}
-            
-            for fmt in formats:
+            for fmt in info.get('formats', []):
                 if fmt.get('vcodec') != 'none':
                     height = fmt.get('height', 0)
-                    if height >= 1080:
-                        quality_map['1080p'] = fmt['format_id']
-                    elif height >= 720:
-                        quality_map['720p'] = fmt['format_id']
-                    elif height >= 480:
-                        quality_map['480p'] = fmt['format_id']
-                    else:
-                        quality_map['SD'] = fmt['format_id']
+                    if height >= 1080: quality_map['1080p'] = fmt['format_id']
+                    elif height >= 720: quality_map['720p'] = fmt['format_id']
+                    elif height >= 480: quality_map['480p'] = fmt['format_id']
+                    else: quality_map['SD'] = fmt['format_id']
             
             if quality_map:
                 quality_map['best'] = 'bestvideo+bestaudio/best'
                 quality_map['mp3'] = 'bestaudio/best'
                 return quality_map
             return None
-            
     except yt_dlp.utils.DownloadError as e:
         if 'rate limit' in str(e).lower() or '429' in str(e):
             raise Exception("Instagram servers are busy. Please try again later.")
-        logger.error(f"Instagram download error: {str(e)}")
+        logger.error(f"Instagram error: {str(e)}")
         return None
     except Exception as e:
-        logger.error(f"Error checking Instagram qualities: {str(e)}")
+        logger.error(f"Instagram quality error: {str(e)}")
         return None
 
 def get_other_platform_qualities(url):
-    """Get quality options for non-YouTube platforms"""
+    """Get quality options for other platforms"""
     try:
-        cookies_file = get_cookies_for_url(url)
         ydl_opts = {
             'quiet': True,
-            'cookiefile': cookies_file if cookies_file else None
+            'cookiefile': get_cookies_for_url(url)
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)
             formats = info.get('formats', [])
-            
             if not formats:
                 return None
 
@@ -254,55 +227,37 @@ def get_other_platform_qualities(url):
             
             for f in formats:
                 if f.get('acodec') != 'none' and f.get('vcodec') != 'none':
-                    res = f.get('height', 0)
                     video_formats.append({
                         'id': f['format_id'],
-                        'quality': f"{res}p",
+                        'quality': f"{f.get('height', 0)}p",
                         'type': 'video'
                     })
                 elif f.get('acodec') != 'none':
-                    abr = f.get('abr', 0)
                     audio_formats.append({
                         'id': f['format_id'],
-                        'quality': f"{abr}kbps",
+                        'quality': f"{f.get('abr', 0)}kbps",
                         'type': 'audio'
                     })
 
-            seen_video = set()
-            unique_video = []
-            for v in sorted(video_formats, key=lambda x: float(x['quality'].replace('p', '')), reverse=True):
-                if v['quality'] not in seen_video:
-                    seen_video.add(v['quality'])
-                    unique_video.append(v)
-            
-            seen_audio = set()
-            unique_audio = []
-            for a in sorted(audio_formats, key=lambda x: float(x['quality'].replace('kbps', '')), reverse=True):
-                if a['quality'] not in seen_audio:
-                    seen_audio.add(a['quality'])
-                    unique_audio.append(a)
-
             quality_map = {}
-            for fmt in unique_video:
-                quality_map[fmt['quality']] = fmt['id']
+            for fmt in sorted(video_formats, key=lambda x: float(x['quality'].replace('p', '')), reverse=True):
+                if fmt['quality'] not in quality_map:
+                    quality_map[fmt['quality']] = fmt['id']
             
-            for fmt in unique_audio:
+            for fmt in sorted(audio_formats, key=lambda x: float(x['quality'].replace('kbps', '')), reverse=True):
                 quality_map[f"{fmt['quality']} (Audio)"] = fmt['id']
             
             quality_map['best'] = 'bestvideo+bestaudio/best'
             quality_map['mp3'] = 'bestaudio/best'
-            
             return quality_map
-            
     except Exception as e:
-        logger.error(f"Error getting other platform formats: {str(e)}")
+        logger.error(f"Other platform error: {str(e)}")
         return None
 
 def download_media(url, quality, format_id=None):
     """Download media with selected quality"""
     try:
         temp_dir = tempfile.mkdtemp()
-        
         ydl_opts = {
             'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
             'merge_output_format': 'mp4',
@@ -312,14 +267,11 @@ def download_media(url, quality, format_id=None):
                 {'key': 'EmbedThumbnail'}
             ],
             'quiet': True,
-            'retries': 3,
-            'fragment_retries': 3,
-            'skip_unavailable_fragments': True
+            'retries': 3
         }
         
-        cookies_file = get_cookies_for_url(url)
-        if cookies_file:
-            ydl_opts['cookiefile'] = cookies_file
+        if cookies := get_cookies_for_url(url):
+            ydl_opts['cookiefile'] = cookies
         
         if quality == 'mp3':
             ydl_opts['format'] = 'bestaudio/best'
@@ -339,7 +291,7 @@ def download_media(url, quality, format_id=None):
                     'best': 'bestvideo+bestaudio/best'
                 }.get(quality, 'bestvideo+bestaudio/best')
             else:
-                ydl_opts['format'] = format_id if format_id else 'bestvideo+bestaudio/best'
+                ydl_opts['format'] = format_id or 'bestvideo+bestaudio/best'
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -356,97 +308,120 @@ def download_media(url, quality, format_id=None):
                     return new_filename, info.get('title', 'video')
                 
         return None, None
-        
     except Exception as e:
-        logger.error(f"Error downloading video: {str(e)}")
+        logger.error(f"Download error: {str(e)}")
         return None, None
     finally:
         try:
             if os.path.exists(temp_dir) and not os.listdir(temp_dir):
                 os.rmdir(temp_dir)
         except Exception as e:
-            logger.warning(f"Error cleaning temp dir: {str(e)}")
+            logger.warning(f"Temp dir cleanup error: {str(e)}")
+
+def send_whatsapp_message(text):
+    """Send text message to authorized group"""
+    try:
+        response = requests.post(
+            f"{GREEN_API['apiUrl']}/waInstance{GREEN_API['idInstance']}/sendMessage/{GREEN_API['apiToken']}",
+            json={"chatId": AUTHORIZED_GROUP, "message": text},
+            headers={'Content-Type': 'application/json'}
+        )
+        response.raise_for_status()
+        logger.info(f"Message sent: {text[:50]}...")
+        return True
+    except Exception as e:
+        logger.error(f"Message send error: {str(e)}")
+        return False
+
+def send_whatsapp_file(file_path, caption, is_video=False):
+    """Send file with caption to group"""
+    try:
+        with open(file_path, 'rb') as file:
+            response = requests.post(
+                f"{GREEN_API['mediaUrl']}/waInstance{GREEN_API['idInstance']}/sendFileByUpload/{GREEN_API['apiToken']}",
+                files={'file': (os.path.basename(file_path), file, 
+                      'video/mp4' if is_video else 'audio/mpeg' if file_path.endswith('.mp3') else 'image/jpeg')},
+                data={'chatId': AUTHORIZED_GROUP, 'caption': caption}
+            )
+            response.raise_for_status()
+            logger.info(f"File sent: {caption[:50]}...")
+            return True
+    except Exception as e:
+        logger.error(f"File send error: {str(e)}")
+        return False
 
 def send_quality_options(session_key, url):
-    """Check available qualities and send options to user or error message"""
+    """Send available quality options"""
     send_whatsapp_message("🔍 Checking available video qualities...")
     
     try:
         quality_map = get_available_qualities(url)
+        if not quality_map:
+            raise Exception("No qualities available")
         
-        if quality_map is None:
-            if is_instagram_url(url):
-                send_whatsapp_message("⚠️ Instagram servers are busy. Please try again later.")
-            else:
-                send_whatsapp_message("⚠️ Could not determine available qualities. Please try again later.")
-            return
-        
-        user_sessions[session_key] = {
-            'url': url,
-            'quality_map': quality_map,
-            'awaiting_quality': True
-        }
-        
-        options_text = "📺 Available download options:\n\n"
-        option_number = 1
-        option_map = {}
-        
-        for qual in quality_map.keys():
-            if qual == 'mp3' or '(Audio)' in qual:
-                options_text += f"{option_number}. MP3 (Audio only)\n"
-                option_map[str(option_number)] = ('mp3', None)
-            elif qual == 'best':
-                options_text += f"{option_number}. Best available quality\n"
-                option_map[str(option_number)] = ('best', quality_map[qual])
-            else:
-                options_text += f"{option_number}. {qual}\n"
-                option_map[str(option_number)] = (qual, quality_map[qual])
-            option_number += 1
-        
-        options_text += "\nReply with the number of your choice"
-        
-        user_sessions[session_key]['option_map'] = option_map
-        send_whatsapp_message(options_text)
-        
+        with session_lock:
+            user_sessions[session_key] = {
+                'url': url,
+                'quality_map': quality_map,
+                'awaiting_quality': True,
+                'option_map': {}
+            }
+            
+            options_text = "📺 Available download options:\n\n"
+            option_number = 1
+            
+            for qual in quality_map:
+                if qual == 'mp3' or '(Audio)' in qual:
+                    options_text += f"{option_number}. MP3 (Audio only)\n"
+                    user_sessions[session_key]['option_map'][str(option_number)] = ('mp3', None)
+                elif qual == 'best':
+                    options_text += f"{option_number}. Best available quality\n"
+                    user_sessions[session_key]['option_map'][str(option_number)] = ('best', quality_map[qual])
+                else:
+                    options_text += f"{option_number}. {qual}\n"
+                    user_sessions[session_key]['option_map'][str(option_number)] = (qual, quality_map[qual])
+                option_number += 1
+            
+            options_text += "\nReply with the number of your choice"
+            send_whatsapp_message(options_text)
     except Exception as e:
-        logger.error(f"Error in send_quality_options: {str(e)}")
-        if is_instagram_url(url):
-            send_whatsapp_message("⚠️ Instagram servers are busy. Please try again later.")
-        else:
-            send_whatsapp_message("⚠️ Error checking video qualities. Please try again later.")
+        error_msg = "⚠️ Instagram servers are busy. Please try again later." if is_instagram_url(url) else "⚠️ Error checking video qualities. Please try again later."
+        send_whatsapp_message(error_msg)
+        logger.error(f"Quality options error: {str(e)}")
 
 def send_course_options(session_key, query=None):
-    """Send alphabetically sorted course folder options to user"""
+    """Send course options to user"""
     send_whatsapp_message("🔍 Searching for courses...")
     
-    folders = list_course_folders(query)
-    if not folders:
-        send_whatsapp_message("❌ No matching courses found.")
-        return
-    
-    user_sessions[session_key] = {
-        'folders': folders,
-        'awaiting_course_selection': True
-    }
-    
-    options_text = "📚 Available Courses (A-Z):\n\n"
-    option_number = 1
-    option_map = {}
-    
-    sorted_folders = sorted(folders, key=lambda x: x['name'].lower())
-    
-    for folder in sorted_folders:
-        options_text += f"{option_number}. {folder['name']}\n"
-        option_map[str(option_number)] = folder['id']
-        option_number += 1
-    
-    options_text += "\nReply with the number of your choice"
-    
-    user_sessions[session_key]['option_map'] = option_map
-    send_whatsapp_message(options_text)
+    try:
+        folders = list_course_folders(query)
+        if not folders:
+            send_whatsapp_message("❌ No matching courses found.")
+            return
+        
+        with session_lock:
+            user_sessions[session_key] = {
+                'folders': folders,
+                'awaiting_course_selection': True,
+                'option_map': {}
+            }
+            
+            options_text = "📚 Available Courses (A-Z):\n\n"
+            option_number = 1
+            
+            for folder in sorted(folders, key=lambda x: x['name'].lower()):
+                options_text += f"{option_number}. {folder['name']}\n"
+                user_sessions[session_key]['option_map'][str(option_number)] = folder['id']
+                option_number += 1
+            
+            options_text += "\nReply with the number of your choice"
+            send_whatsapp_message(options_text)
+    except Exception as e:
+        send_whatsapp_message("❌ Error searching courses. Please try again.")
+        logger.error(f"Course options error: {str(e)}")
 
 def list_course_folders(query=None):
-    """List all course folders matching query in alphabetical order"""
+    """List course folders from Google Drive"""
     try:
         service = get_drive_service()
         if not service:
@@ -454,38 +429,34 @@ def list_course_folders(query=None):
             
         folders = []
         page_token = None
+        q = f"'{DRIVE_FOLDER_ID}' in parents and mimeType='application/vnd.google-apps.folder'"
+        if query and query.lower() != 'all':
+            q += f" and name contains '{query}'"
         
         while True:
-            q = f"'{DRIVE_FOLDER_ID}' in parents and mimeType='application/vnd.google-apps.folder'"
-            if query and query.lower() != 'all':
-                q += f" and name contains '{query}'"
+            response = service.files().list(
+                q=q,
+                spaces='drive',
+                fields='nextPageToken, files(id, name)',
+                pageToken=page_token,
+                orderBy='name'
+            ).execute()
             
-            try:
-                response = service.files().list(
-                    q=q,
-                    spaces='drive',
-                    fields='nextPageToken, files(id, name)',
-                    pageToken=page_token,
-                    orderBy='name'
-                ).execute()
-                
-                folders.extend(response.get('files', []))
-                page_token = response.get('nextPageToken', None)
-                
-                if page_token is None:
-                    break
-                    
-            except HttpError as e:
-                logger.error(f"Google Drive API error: {str(e)}")
+            folders.extend(response.get('files', []))
+            page_token = response.get('nextPageToken')
+            if not page_token:
                 break
-        
+                
         return folders
+    except HttpError as e:
+        logger.error(f"Drive API error: {str(e)}")
+        return None
     except Exception as e:
-        logger.error(f"Error listing course folders: {str(e)}")
+        logger.error(f"Course list error: {str(e)}")
         return None
 
 def search_youtube(query):
-    """Search YouTube and return top result"""
+    """Search YouTube videos"""
     try:
         ydl_opts = {
             'quiet': True,
@@ -506,11 +477,11 @@ def search_youtube(query):
                 'thumbnail': entry.get('thumbnail', '')
             }
     except Exception as e:
-        logger.error(f"Error searching YouTube: {str(e)}")
+        logger.error(f"YouTube search error: {str(e)}")
         return None
 
 def get_youtube_thumbnail(url):
-    """Get highest resolution thumbnail from YouTube URL"""
+    """Get YouTube thumbnail"""
     try:
         ydl_opts = {
             'quiet': True,
@@ -529,150 +500,79 @@ def get_youtube_thumbnail(url):
                 thumbnails.sort(key=lambda x: x.get('width', 0), reverse=True)
                 return thumbnails[0]['url']
             
-            return info.get('thumbnail', None)
+            return info.get('thumbnail')
     except Exception as e:
-        logger.error(f"Error getting YouTube thumbnail: {str(e)}")
+        logger.error(f"Thumbnail error: {str(e)}")
         return None
 
-def send_whatsapp_message(text):
-    """Send text message to authorized group"""
-    url = f"{GREEN_API['apiUrl']}/waInstance{GREEN_API['idInstance']}/sendMessage/{GREEN_API['apiToken']}"
-    payload = {
-        "chatId": AUTHORIZED_GROUP,
-        "message": text
-    }
-    headers = {'Content-Type': 'application/json'}
-    
+def process_user_message(session_key, message):
+    """Process user message in thread"""
     try:
-        response = requests.post(url, json=payload, headers=headers)
-        response.raise_for_status()
-        logger.info(f"Message sent to group: {text[:50]}...")
-        return True
-    except Exception as e:
-        logger.error(f"Failed to send message to group: {str(e)}")
-        return False
-
-def send_whatsapp_file(file_path, caption, is_video=False):
-    """Send file (video or image) with caption to group"""
-    try:
-        url = f"{GREEN_API['mediaUrl']}/waInstance{GREEN_API['idInstance']}/sendFileByUpload/{GREEN_API['apiToken']}"
+        with session_lock:
+            session_data = user_sessions.get(session_key, {})
         
-        with open(file_path, 'rb') as file:
-            files = {
-                'file': (os.path.basename(file_path), file, 'video/mp4' if is_video else 'audio/mpeg' if file_path.endswith('.mp3') else 'image/jpeg')
-            }
-            data = {
-                'chatId': AUTHORIZED_GROUP,
-                'caption': caption
-            }
-            
-            response = requests.post(url, files=files, data=data)
-            response.raise_for_status()
-            logger.info(f"File sent to group with caption: {caption[:50]}...")
-            return True
-            
-    except Exception as e:
-        logger.error(f"File upload to group failed: {str(e)}")
-        return False
-
-# ======================
-# WEBHOOK HANDLER
-# ======================
-@app.route('/webhook', methods=['POST'])
-def handle_webhook():
-    try:
-        data = request.json
-        logger.info(f"RAW WEBHOOK DATA:\n{data}")
-
-        sender_data = data.get('senderData', {})
-        sender = sender_data.get('sender', '')
-        chat_id = sender_data.get('chatId', '')
-        
-        # Only respond to messages from the authorized group
-        if chat_id != AUTHORIZED_GROUP:
-            logger.warning(f"Ignoring message from: {chat_id}")
-            return jsonify({'status': 'ignored'}), 200
-
-        # Create unique session key combining sender and chat_id
-        session_key = f"{chat_id}_{sender}"
-
-        message_data = data.get('messageData', {})
-        if message_data.get('typeMessage') == 'textMessage':
-            message = message_data.get('textMessageData', {}).get('textMessage', '').strip()
-        elif message_data.get('typeMessage') == 'extendedTextMessage':
-            message = message_data.get('extendedTextMessageData', {}).get('text', '').strip()
-        else:
-            logger.warning(f"Unsupported message type: {message_data.get('typeMessage')}")
-            return jsonify({'status': 'unsupported_type'}), 200
-
-        if not message:
-            logger.warning("Received empty message")
-            return jsonify({'status': 'empty_message'}), 200
-
-        logger.info(f"PROCESSING MESSAGE FROM {sender} IN GROUP {chat_id}: {message}")
-
         # Handle quality selection
-        if session_key in user_sessions and user_sessions[session_key].get('awaiting_quality'):
-            try:
-                choice = message.strip()
-                option_map = user_sessions[session_key].get('option_map', {})
+        if session_data.get('awaiting_quality'):
+            choice = message.strip()
+            option_map = session_data.get('option_map', {})
+            
+            if choice in option_map:
+                quality, format_id = option_map[choice]
+                url = session_data['url']
                 
-                if choice in option_map:
-                    quality, format_id = option_map[choice]
-                    url = user_sessions[session_key]['url']
-                    del user_sessions[session_key]  # Clear the session after use
-                    
-                    if quality == 'mp3' or '(Audio)' in quality:
-                        send_whatsapp_message("⬇️ Downloading MP3 audio...")
-                        file_path, title = download_media(url, 'mp3')
-                        if file_path:
-                            send_whatsapp_file(file_path, f"🎵 {title}", is_video=False)
-                            os.remove(file_path)
-                            os.rmdir(os.path.dirname(file_path))
-                        else:
-                            send_whatsapp_message("❌ Failed to download audio. Please try again.")
+                with session_lock:
+                    if session_key in user_sessions:
+                        del user_sessions[session_key]
+                
+                if quality == 'mp3' or '(Audio)' in quality:
+                    send_whatsapp_message("⬇️ Downloading MP3 audio...")
+                    file_path, title = download_media(url, 'mp3')
+                    if file_path:
+                        send_whatsapp_file(file_path, f"🎵 {title}", is_video=False)
+                        os.remove(file_path)
+                        os.rmdir(os.path.dirname(file_path))
                     else:
-                        send_whatsapp_message(f"⬇️ Downloading {quality} quality...")
-                        file_path, title = download_media(url, quality, format_id)
-                        if file_path:
-                            send_whatsapp_file(file_path, f"🎥 {title}\nQuality: {quality}", is_video=True)
-                            os.remove(file_path)
-                            os.rmdir(os.path.dirname(file_path))
-                        else:
-                            send_whatsapp_message("❌ Failed to download media. Please try again.")
+                        send_whatsapp_message("❌ Failed to download audio. Please try again.")
                 else:
-                    send_whatsapp_message("❌ Invalid choice. Please select one of the available options.")
-                    url = user_sessions[session_key]['url']
-                    send_quality_options(session_key, url)
-                return jsonify({'status': 'processed'})
-            except Exception as e:
-                logger.error(f"Error processing quality choice: {str(e)}")
-                send_whatsapp_message("❌ Invalid input. Please try again.")
-                return jsonify({'status': 'processed'})
+                    send_whatsapp_message(f"⬇️ Downloading {quality} quality...")
+                    file_path, title = download_media(url, quality, format_id)
+                    if file_path:
+                        send_whatsapp_file(file_path, f"🎥 {title}\nQuality: {quality}", is_video=True)
+                        os.remove(file_path)
+                        os.rmdir(os.path.dirname(file_path))
+                    else:
+                        send_whatsapp_message("❌ Failed to download media. Please try again.")
+            else:
+                send_whatsapp_message("❌ Invalid choice. Please select one of the available options.")
+                with session_lock:
+                    if session_key in user_sessions:
+                        url = user_sessions[session_key]['url']
+                send_quality_options(session_key, url)
+            return
 
         # Handle course selection
-        if session_key in user_sessions and user_sessions[session_key].get('awaiting_course_selection'):
-            try:
-                choice = message.strip()
-                option_map = user_sessions[session_key].get('option_map', {})
+        if session_data.get('awaiting_course_selection'):
+            choice = message.strip()
+            option_map = session_data.get('option_map', {})
+            
+            if choice in option_map:
+                folder_id = option_map[choice]
+                folders = session_data['folders']
+                folder_name = next((f['name'] for f in folders if f['id'] == folder_id), "Selected Course")
                 
-                if choice in option_map:
-                    folder_id = option_map[choice]
-                    folders = user_sessions[session_key]['folders']
-                    folder_name = next((f['name'] for f in folders if f['id'] == folder_id), "Selected Course")
-                    del user_sessions[session_key]  # Clear the session after use
-                    
-                    folder_url = f"https://drive.google.com/drive/folders/{folder_id}"
-                    send_whatsapp_message(f"📂 {folder_name}\n\n{folder_url}")
-                else:
-                    send_whatsapp_message("❌ Invalid choice. Please select one of the available options.")
-                    query = user_sessions[session_key].get('query', None)
-                    send_course_options(session_key, query)
-                return jsonify({'status': 'processed'})
-            except Exception as e:
-                logger.error(f"Error processing course choice: {str(e)}")
-                send_whatsapp_message("❌ Invalid input. Please try again.")
-                return jsonify({'status': 'processed'})
+                with session_lock:
+                    if session_key in user_sessions:
+                        del user_sessions[session_key]
+                
+                folder_url = f"https://drive.google.com/drive/folders/{folder_id}"
+                send_whatsapp_message(f"📂 {folder_name}\n\n{folder_url}")
+            else:
+                send_whatsapp_message("❌ Invalid choice. Please select one of the available options.")
+                with session_lock:
+                    if session_key in user_sessions:
+                        query = user_sessions[session_key].get('query', None)
+                send_course_options(session_key, query)
+            return
 
         # Command handling
         if message.lower() in ['hi', 'hello', 'hey']:
@@ -754,30 +654,65 @@ Paste any video URL (YouTube, Instagram, TikTok, Facebook, Pinterest, Google Dri
             ensure_files()
             send_quality_options(session_key, message)
 
-        return jsonify({'status': 'processed'})
+    except Exception as e:
+        logger.error(f"Message processing error: {str(e)}")
+        send_whatsapp_message("❌ An error occurred. Please try again.")
+
+@app.route('/webhook', methods=['POST'])
+def handle_webhook():
+    try:
+        data = request.json
+        logger.info(f"RAW WEBHOOK DATA:\n{data}")
+
+        sender_data = data.get('senderData', {})
+        sender = sender_data.get('sender', '')
+        chat_id = sender_data.get('chatId', '')
+        
+        # Ignore messages from the bot itself
+        if BOT_NUMBER in sender:
+            logger.info("Ignoring message from bot itself")
+            return jsonify({'status': 'ignored'}), 200
+        
+        # Only respond to messages from the authorized group
+        if chat_id != AUTHORIZED_GROUP:
+            logger.warning(f"Ignoring message from: {chat_id}")
+            return jsonify({'status': 'ignored'}), 200
+
+        # Get message content
+        message_data = data.get('messageData', {})
+        if message_data.get('typeMessage') == 'textMessage':
+            message = message_data.get('textMessageData', {}).get('textMessage', '').strip()
+        elif message_data.get('typeMessage') == 'extendedTextMessage':
+            message = message_data.get('extendedTextMessageData', {}).get('text', '').strip()
+        else:
+            logger.warning(f"Unsupported message type: {message_data.get('typeMessage')}")
+            return jsonify({'status': 'unsupported_type'}), 200
+
+        if not message:
+            logger.warning("Received empty message")
+            return jsonify({'status': 'empty_message'}), 200
+
+        logger.info(f"PROCESSING MESSAGE FROM {sender} IN GROUP {chat_id}: {message}")
+
+        # Create unique session key and process in thread
+        session_key = f"{chat_id}_{sender}"
+        executor.submit(process_user_message, session_key, message)
+
+        return jsonify({'status': 'processing'}), 200
 
     except Exception as e:
-        logger.error(f"WEBHOOK ERROR: {str(e)}", exc_info=True)
+        logger.error(f"WEBHOOK ERROR: {str(e)}")
         return jsonify({'status': 'error'}), 500
 
-# ======================
-# HEALTH CHECK
-# ======================
 @app.route('/')
 def health_check():
     return jsonify({
         "status": "active",
         "authorized_group": AUTHORIZED_GROUP,
         "instance_id": GREEN_API['idInstance'],
-        "instagram_cookies": "present" if os.path.exists(IG_COOKIES_FILE) else "missing",
-        "youtube_cookies": "present" if os.path.exists(YT_COOKIES_FILE) else "missing",
-        "google_token": "present" if os.path.exists(TOKEN_FILE) else "missing",
         "timestamp": datetime.now().isoformat()
     })
 
-# ======================
-# START SERVER
-# ======================
 if __name__ == '__main__':
     ensure_files()
     
@@ -785,10 +720,8 @@ if __name__ == '__main__':
     ============================================
     WhatsApp Media Bot READY
     ONLY responding to group: {AUTHORIZED_GROUP}
+    Ignoring messages from: {BOT_NUMBER}
     GreenAPI Instance: {GREEN_API['idInstance']}
-    Instagram Cookies: {'Present' if os.path.exists(IG_COOKIES_FILE) else 'Missing'}
-    YouTube Cookies: {'Present' if os.path.exists(YT_COOKIES_FILE) else 'Missing'}
-    Google Token: {'Present' if os.path.exists(TOKEN_FILE) else 'Missing'}
     ============================================
     """)
     serve(app, host='0.0.0.0', port=8000)
