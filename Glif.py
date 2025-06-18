@@ -123,6 +123,55 @@ def check_audio(filename):
         logger.error(f"Audio check error: {str(e)}")
         return False
 
+def get_estimated_size(url, quality):
+    """Estimate file size before downloading"""
+    try:
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': False,
+            'cookiefile': get_cookies_for_url(url),
+            'format': 'best' if quality == 'best' else f'best[filesize<100M]'
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            if not info:
+                return None
+                
+            # Try to get filesize if available
+            if 'filesize' in info and info['filesize']:
+                return info['filesize']
+                
+            # Estimate from duration and format
+            if 'duration' in info and 'format' in info:
+                duration = info['duration']
+                bitrate = 0
+                
+                if quality == 'mp3':
+                    bitrate = 192  # kbps
+                elif quality == '144p':
+                    bitrate = 200  # kbps
+                elif quality == '360p':
+                    bitrate = 500  # kbps
+                elif quality == '480p':
+                    bitrate = 1000 # kbps
+                elif quality == '720p':
+                    bitrate = 2500 # kbps
+                elif quality == '1080p':
+                    bitrate = 5000 # kbps
+                else:  # best or unknown
+                    bitrate = 8000 # kbps
+                
+                # Calculate estimated size in bytes
+                estimated_size = (bitrate * 1000 * duration) / 8
+                return estimated_size
+                
+        return None
+    except Exception as e:
+        logger.error(f"Size estimation error: {str(e)}")
+        return None
+
 def get_available_qualities(url):
     """Get available qualities for URL"""
     try:
@@ -257,6 +306,11 @@ def get_other_platform_qualities(url):
 def download_media(url, quality, format_id=None):
     """Download media with selected quality"""
     try:
+        # First try to estimate size before downloading
+        estimated_size = get_estimated_size(url, quality)
+        if estimated_size and estimated_size > 100 * 1024 * 1024:  # 100MB
+            return None, "File size exceeds 100MB limit"
+        
         temp_dir = tempfile.mkdtemp()
         ydl_opts = {
             'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
@@ -297,9 +351,17 @@ def download_media(url, quality, format_id=None):
             info = ydl.extract_info(url, download=True)
             filename = ydl.prepare_filename(info)
             
+            # Check actual file size after download
+            if os.path.exists(filename) and os.path.getsize(filename) > 100 * 1024 * 1024:
+                os.remove(filename)
+                return None, "File size exceeds 100MB limit"
+            
             if quality == 'mp3':
                 mp3_file = filename.replace('.webm', '.mp3').replace('.m4a', '.mp3')
                 if os.path.exists(mp3_file):
+                    if os.path.getsize(mp3_file) > 100 * 1024 * 1024:
+                        os.remove(mp3_file)
+                        return None, "File size exceeds 100MB limit"
                     return mp3_file, info.get('title', 'audio')
             else:
                 if check_audio(filename):
@@ -367,7 +429,7 @@ def send_quality_options(session_key, url):
                 'option_map': {}
             }
             
-            options_text = "📺 Available download options:\n\n"
+            options_text = "📺 Available download options (Max 100MB):\n\n"
             option_number = 1
             
             for qual in quality_map:
@@ -505,7 +567,7 @@ def get_youtube_thumbnail(url):
         logger.error(f"Thumbnail error: {str(e)}")
         return None
 
-def process_user_message(session_key, message):
+def process_user_message(session_key, message, chat_id):
     """Process user message in thread"""
     try:
         with session_lock:
@@ -526,22 +588,24 @@ def process_user_message(session_key, message):
                 
                 if quality == 'mp3' or '(Audio)' in quality:
                     send_whatsapp_message("⬇️ Downloading MP3 audio...")
-                    file_path, title = download_media(url, 'mp3')
+                    file_path, title_or_error = download_media(url, 'mp3')
                     if file_path:
-                        send_whatsapp_file(file_path, f"🎵 {title}", is_video=False)
+                        send_whatsapp_file(file_path, f"🎵 {title_or_error}", is_video=False)
                         os.remove(file_path)
                         os.rmdir(os.path.dirname(file_path))
                     else:
-                        send_whatsapp_message("❌ Failed to download audio. Please try again.")
+                        error_msg = title_or_error if isinstance(title_or_error, str) else "❌ Failed to download audio. Please try again."
+                        send_whatsapp_message(error_msg)
                 else:
                     send_whatsapp_message(f"⬇️ Downloading {quality} quality...")
-                    file_path, title = download_media(url, quality, format_id)
+                    file_path, title_or_error = download_media(url, quality, format_id)
                     if file_path:
-                        send_whatsapp_file(file_path, f"🎥 {title}\nQuality: {quality}", is_video=True)
+                        send_whatsapp_file(file_path, f"🎥 {title_or_error}\nQuality: {quality}", is_video=True)
                         os.remove(file_path)
                         os.rmdir(os.path.dirname(file_path))
                     else:
-                        send_whatsapp_message("❌ Failed to download media. Please try again.")
+                        error_msg = title_or_error if isinstance(title_or_error, str) else "❌ Failed to download media. Please try again."
+                        send_whatsapp_message(error_msg)
             else:
                 send_whatsapp_message("❌ Invalid choice. Please select one of the available options.")
                 with session_lock:
@@ -580,6 +644,7 @@ def process_user_message(session_key, message):
 
 📥 Media Download:
 Paste any video URL (YouTube, Instagram, TikTok, Facebook, Pinterest, Google Drive etc.) to download
+(Max file size: 100MB)
 
 🔍 Search:
 /search [query] - Search YouTube for videos
@@ -590,6 +655,9 @@ Paste any video URL (YouTube, Instagram, TikTok, Facebook, Pinterest, Google Dri
 
 🎨 Thumbnails:
 /thumb [YouTube URL] - Get YouTube video thumbnail
+
+🔄 Reset:
+/reset - Clear all sessions and temp files
 
 ℹ️ Help:
 /help - Show this message"""
@@ -600,6 +668,7 @@ Paste any video URL (YouTube, Instagram, TikTok, Facebook, Pinterest, Google Dri
 
 📥 Media Download:
 Paste any video URL (YouTube, Instagram, TikTok, Facebook, Pinterest, Google Drive etc.) to download
+(Max file size: 100MB)
 
 🔍 Search:
 /search [query] - Search YouTube for videos
@@ -610,6 +679,9 @@ Paste any video URL (YouTube, Instagram, TikTok, Facebook, Pinterest, Google Dri
 
 🎨 Thumbnails:
 /thumb [YouTube URL] - Get YouTube video thumbnail
+
+🔄 Reset:
+/reset - Clear all sessions and temp files
 
 ℹ️ Help:
 /help - Show this message"""
@@ -648,6 +720,25 @@ Paste any video URL (YouTube, Instagram, TikTok, Facebook, Pinterest, Google Dri
                 send_whatsapp_message("Please specify a search query or 'all' to list all courses")
             else:
                 send_course_options(session_key, query if query.lower() != 'all' else None)
+        
+        elif message.lower().startswith('/reset'):
+            if chat_id == AUTHORIZED_GROUP:  # Only allow reset from authorized group
+                # Clear all sessions
+                with session_lock:
+                    user_sessions.clear()
+                    
+                # Clean up temp files
+                temp_dir = tempfile.gettempdir()
+                for filename in os.listdir(temp_dir):
+                    if filename.startswith(('yt_thumbnail', 'tmp')):
+                        try:
+                            os.remove(os.path.join(temp_dir, filename))
+                        except:
+                            pass
+                        
+                send_whatsapp_message("🔄 Bot has been reset to initial state - all sessions and temp files cleared")
+            else:
+                send_whatsapp_message("❌ Reset command can only be used in authorized group")
         
         # Handle URLs
         elif any(proto in message.lower() for proto in ['http://', 'https://']):
@@ -696,7 +787,7 @@ def handle_webhook():
 
         # Create unique session key and process in thread
         session_key = f"{chat_id}_{sender}"
-        executor.submit(process_user_message, session_key, message)
+        executor.submit(process_user_message, session_key, message, chat_id)
 
         return jsonify({'status': 'processing'}), 200
 
@@ -722,6 +813,7 @@ if __name__ == '__main__':
     ONLY responding to group: {AUTHORIZED_GROUP}
     Ignoring messages from: {BOT_NUMBER}
     GreenAPI Instance: {GREEN_API['idInstance']}
+    Max file size: 100MB
     ============================================
     """)
     serve(app, host='0.0.0.0', port=8000)
