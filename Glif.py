@@ -7,6 +7,7 @@ import yt_dlp
 import os
 import tempfile
 import subprocess
+import re
 
 app = Flask(__name__)
 
@@ -21,7 +22,8 @@ GREEN_API = {
 }
 AUTHORIZED_NUMBER = "923190779215"
 COOKIES_FILE = "igcookies.txt"
-COOKIES_URL = "https://cdn.indexer.eu.org/-1002243289687/125/1750248647/ea1dc21dadb79b3449291a9e67082ede321166751c2943dc0077a62dda1c4f4e"
+COOKIES_DRIVE_URL = "https://drive.google.com/uc?export=download&id=13kNOfYmC8kZEE9Le786ndnZbdPpGBtEX"
+USE_COOKIES = True  # Default setting
 
 # ======================
 # LOGGING SETUP
@@ -34,22 +36,34 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 def download_cookies_file():
-    """Download the Instagram cookies file if it doesn't exist"""
-    if not os.path.exists(COOKIES_FILE):
-        try:
-            logger.info("Downloading Instagram cookies file...")
-            response = requests.get(COOKIES_URL)
-            response.raise_for_status()
+    """Download the Instagram cookies file from Google Drive"""
+    try:
+        logger.info("Downloading Instagram cookies file from Google Drive...")
+        
+        # Create a session to handle potential large file warnings
+        session = requests.Session()
+        response = session.get(COOKIES_DRIVE_URL, stream=True)
+        response.raise_for_status()
+        
+        # Handle Google Drive virus scan warning
+        content = response.content
+        if b'Google Drive - Virus scan warning' in content:
+            confirm = re.search(r'confirm=([^&]+)', response.url)
+            if confirm:
+                new_url = f"{COOKIES_DRIVE_URL}&confirm={confirm.group(1)}"
+                response = session.get(new_url, stream=True)
+                response.raise_for_status()
+                content = response.content
+        
+        # Save the file
+        with open(COOKIES_FILE, 'wb') as f:
+            f.write(content)
             
-            with open(COOKIES_FILE, 'wb') as f:
-                f.write(response.content)
-                
-            logger.info(f"Successfully downloaded cookies file: {COOKIES_FILE}")
-            return True
-        except Exception as e:
-            logger.error(f"Failed to download cookies file: {str(e)}")
-            return False
-    return True
+        logger.info(f"Successfully downloaded cookies file: {COOKIES_FILE}")
+        return True
+    except Exception as e:
+        logger.error(f"Failed to download cookies file: {str(e)}")
+        return False
 
 # ======================
 # CORE FUNCTIONS
@@ -119,7 +133,6 @@ def download_instagram_video(url):
         
         ydl_opts = {
             'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
-            'cookiefile': COOKIES_FILE,
             'merge_output_format': 'mp4',
             'format': 'best',
             'quiet': True,
@@ -127,6 +140,13 @@ def download_instagram_video(url):
             'fragment_retries': 3,
             'skip_unavailable_fragments': True
         }
+        
+        # Add cookies if enabled and file exists
+        if USE_COOKIES and os.path.exists(COOKIES_FILE):
+            ydl_opts['cookiefile'] = COOKIES_FILE
+            logger.info("Using cookies for download")
+        else:
+            logger.info("Downloading without cookies")
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
@@ -180,10 +200,41 @@ def handle_webhook():
 
         logger.info(f"PROCESSING MESSAGE FROM {AUTHORIZED_NUMBER}: {message}")
 
+        # Handle commands
+        if message.lower() == '/on':
+            global USE_COOKIES
+            USE_COOKIES = True
+            if os.path.exists(COOKIES_FILE):
+                send_whatsapp_message("✅ Cookies enabled and file exists")
+            else:
+                if download_cookies_file():
+                    send_whatsapp_message("✅ Cookies enabled and downloaded successfully")
+                else:
+                    send_whatsapp_message("⚠️ Cookies enabled but failed to download file. Will try without cookies when needed.")
+            return jsonify({'status': 'processed'})
+        
+        elif message.lower() == '/off':
+            USE_COOKIES = False
+            send_whatsapp_message("❌ Cookies disabled")
+            return jsonify({'status': 'processed'})
+        
+        elif message.lower() in ['/help', 'help']:
+            help_text = """ℹ️ Instagram Video Downloader Help:
+            
+• Send any Instagram video URL to download it
+• /on - Enable cookies for downloading (recommended)
+• /off - Disable cookies
+• /help - Show this message"""
+            send_whatsapp_message(help_text)
+            return jsonify({'status': 'processed'})
+
         # Check if message is an Instagram URL
         if is_instagram_url(message):
-            if not os.path.exists(COOKIES_FILE):
-                send_whatsapp_message("⚠️ Cookies file missing, trying without...")
+            if USE_COOKIES and not os.path.exists(COOKIES_FILE):
+                if download_cookies_file():
+                    send_whatsapp_message("⬇️ Downloaded cookies file, now downloading video...")
+                else:
+                    send_whatsapp_message("⚠️ Cookies enabled but file missing, trying without...")
             
             send_whatsapp_message("⬇️ Downloading Instagram video...")
             file_path, title = download_instagram_video(message)
@@ -192,9 +243,13 @@ def handle_webhook():
                 os.remove(file_path)
                 os.rmdir(os.path.dirname(file_path))
             else:
-                send_whatsapp_message("❌ Failed to download Instagram video. Please make sure the URL is correct and try again.")
+                send_whatsapp_message("❌ Failed to download Instagram video. Please make sure:")
+                send_whatsapp_message("- The URL is correct and public")
+                send_whatsapp_message("- The video isn't private or age-restricted")
+                if USE_COOKIES:
+                    send_whatsapp_message("- Try disabling cookies with /off if this persists")
         else:
-            send_whatsapp_message("This bot only downloads Instagram videos. Please send a valid Instagram video URL.")
+            send_whatsapp_message("This bot only downloads Instagram videos. Please send a valid Instagram video URL or use /help")
 
         return jsonify({'status': 'processed'})
 
@@ -211,6 +266,8 @@ def health_check():
         "status": "active",
         "authorized_number": AUTHORIZED_NUMBER,
         "instance_id": GREEN_API['idInstance'],
+        "cookies_enabled": USE_COOKIES,
+        "cookies_file_exists": os.path.exists(COOKIES_FILE),
         "timestamp": datetime.now().isoformat()
     })
 
@@ -218,15 +275,18 @@ def health_check():
 # START SERVER
 # ======================
 if __name__ == '__main__':
-    # Download cookies file if it doesn't exist
-    if not download_cookies_file():
-        logger.warning("Running without cookies file - Instagram downloads may fail")
+    # Download cookies file if enabled and doesn't exist
+    if USE_COOKIES and not os.path.exists(COOKIES_FILE):
+        if not download_cookies_file():
+            logger.warning("Running without cookies file - Instagram downloads may fail")
     
     logger.info(f"""
     ============================================
     Instagram Video Downloader READY
     ONLY responding to: {AUTHORIZED_NUMBER}
     GreenAPI Instance: {GREEN_API['idInstance']}
+    Cookies Enabled: {USE_COOKIES}
+    Cookies File: {'Present' if os.path.exists(COOKIES_FILE) else 'Missing'}
     ============================================
     """)
     serve(app, host='0.0.0.0', port=8000)
