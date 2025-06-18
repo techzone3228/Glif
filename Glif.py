@@ -27,7 +27,7 @@ GREEN_API = {
     "mediaUrl": "https://7105.media.greenapi.com"
 }
 AUTHORIZED_GROUP = "120363421227499361@g.us"
-BOT_NUMBER = "+13656174559"
+BOT_NUMBER = "13656174559"
 
 # Cookie configuration
 IG_COOKIES_FILE = "igcookies.txt"
