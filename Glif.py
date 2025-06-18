@@ -38,7 +38,7 @@ TOKEN_FILE = "token.json"
 TOKEN_DRIVE_URL = "https://drive.google.com/uc?export=download&id=14p_O13T1GFyZncJw3pPRYTi2jF2bh9bO"
 SCOPES = ['https://www.googleapis.com/auth/drive']
 
-# User session data
+# User session data - using sender+chat_id as unique key
 user_sessions = {}
 
 # ======================
@@ -367,7 +367,7 @@ def download_media(url, quality, format_id=None):
         except Exception as e:
             logger.warning(f"Error cleaning temp dir: {str(e)}")
 
-def send_quality_options(sender, url):
+def send_quality_options(session_key, url):
     """Check available qualities and send options to user or error message"""
     send_whatsapp_message("🔍 Checking available video qualities...")
     
@@ -381,7 +381,7 @@ def send_quality_options(sender, url):
                 send_whatsapp_message("⚠️ Could not determine available qualities. Please try again later.")
             return
         
-        user_sessions[sender] = {
+        user_sessions[session_key] = {
             'url': url,
             'quality_map': quality_map,
             'awaiting_quality': True
@@ -405,7 +405,7 @@ def send_quality_options(sender, url):
         
         options_text += "\nReply with the number of your choice"
         
-        user_sessions[sender]['option_map'] = option_map
+        user_sessions[session_key]['option_map'] = option_map
         send_whatsapp_message(options_text)
         
     except Exception as e:
@@ -415,9 +415,36 @@ def send_quality_options(sender, url):
         else:
             send_whatsapp_message("⚠️ Error checking video qualities. Please try again later.")
 
-# ======================
-# GOOGLE DRIVE FUNCTIONS
-# ======================
+def send_course_options(session_key, query=None):
+    """Send alphabetically sorted course folder options to user"""
+    send_whatsapp_message("🔍 Searching for courses...")
+    
+    folders = list_course_folders(query)
+    if not folders:
+        send_whatsapp_message("❌ No matching courses found.")
+        return
+    
+    user_sessions[session_key] = {
+        'folders': folders,
+        'awaiting_course_selection': True
+    }
+    
+    options_text = "📚 Available Courses (A-Z):\n\n"
+    option_number = 1
+    option_map = {}
+    
+    sorted_folders = sorted(folders, key=lambda x: x['name'].lower())
+    
+    for folder in sorted_folders:
+        options_text += f"{option_number}. {folder['name']}\n"
+        option_map[str(option_number)] = folder['id']
+        option_number += 1
+    
+    options_text += "\nReply with the number of your choice"
+    
+    user_sessions[session_key]['option_map'] = option_map
+    send_whatsapp_message(options_text)
+
 def list_course_folders(query=None):
     """List all course folders matching query in alphabetical order"""
     try:
@@ -457,39 +484,6 @@ def list_course_folders(query=None):
         logger.error(f"Error listing course folders: {str(e)}")
         return None
 
-def send_course_options(sender, query=None):
-    """Send alphabetically sorted course folder options to user"""
-    send_whatsapp_message("🔍 Searching for courses...")
-    
-    folders = list_course_folders(query)
-    if not folders:
-        send_whatsapp_message("❌ No matching courses found.")
-        return
-    
-    user_sessions[sender] = {
-        'folders': folders,
-        'awaiting_course_selection': True
-    }
-    
-    options_text = "📚 Available Courses (A-Z):\n\n"
-    option_number = 1
-    option_map = {}
-    
-    sorted_folders = sorted(folders, key=lambda x: x['name'].lower())
-    
-    for folder in sorted_folders:
-        options_text += f"{option_number}. {folder['name']}\n"
-        option_map[str(option_number)] = folder['id']
-        option_number += 1
-    
-    options_text += "\nReply with the number of your choice"
-    
-    user_sessions[sender]['option_map'] = option_map
-    send_whatsapp_message(options_text)
-
-# ======================
-# SEARCH & THUMBNAIL FUNCTIONS
-# ======================
 def search_youtube(query):
     """Search YouTube and return top result"""
     try:
@@ -540,9 +534,6 @@ def get_youtube_thumbnail(url):
         logger.error(f"Error getting YouTube thumbnail: {str(e)}")
         return None
 
-# ======================
-# MESSAGING FUNCTIONS
-# ======================
 def send_whatsapp_message(text):
     """Send text message to authorized group"""
     url = f"{GREEN_API['apiUrl']}/waInstance{GREEN_API['idInstance']}/sendMessage/{GREEN_API['apiToken']}"
@@ -593,13 +584,17 @@ def handle_webhook():
         data = request.json
         logger.info(f"RAW WEBHOOK DATA:\n{data}")
 
-        sender = data.get('senderData', {}).get('sender', '')
-        chat_id = data.get('senderData', {}).get('chatId', '')
+        sender_data = data.get('senderData', {})
+        sender = sender_data.get('sender', '')
+        chat_id = sender_data.get('chatId', '')
         
         # Only respond to messages from the authorized group
         if chat_id != AUTHORIZED_GROUP:
             logger.warning(f"Ignoring message from: {chat_id}")
             return jsonify({'status': 'ignored'}), 200
+
+        # Create unique session key combining sender and chat_id
+        session_key = f"{chat_id}_{sender}"
 
         message_data = data.get('messageData', {})
         if message_data.get('typeMessage') == 'textMessage':
@@ -617,15 +612,15 @@ def handle_webhook():
         logger.info(f"PROCESSING MESSAGE FROM {sender} IN GROUP {chat_id}: {message}")
 
         # Handle quality selection
-        if sender in user_sessions and user_sessions[sender].get('awaiting_quality'):
+        if session_key in user_sessions and user_sessions[session_key].get('awaiting_quality'):
             try:
                 choice = message.strip()
-                option_map = user_sessions[sender].get('option_map', {})
+                option_map = user_sessions[session_key].get('option_map', {})
                 
                 if choice in option_map:
                     quality, format_id = option_map[choice]
-                    url = user_sessions[sender]['url']
-                    del user_sessions[sender]
+                    url = user_sessions[session_key]['url']
+                    del user_sessions[session_key]  # Clear the session after use
                     
                     if quality == 'mp3' or '(Audio)' in quality:
                         send_whatsapp_message("⬇️ Downloading MP3 audio...")
@@ -647,8 +642,8 @@ def handle_webhook():
                             send_whatsapp_message("❌ Failed to download media. Please try again.")
                 else:
                     send_whatsapp_message("❌ Invalid choice. Please select one of the available options.")
-                    url = user_sessions[sender]['url']
-                    send_quality_options(sender, url)
+                    url = user_sessions[session_key]['url']
+                    send_quality_options(session_key, url)
                 return jsonify({'status': 'processed'})
             except Exception as e:
                 logger.error(f"Error processing quality choice: {str(e)}")
@@ -656,23 +651,23 @@ def handle_webhook():
                 return jsonify({'status': 'processed'})
 
         # Handle course selection
-        if sender in user_sessions and user_sessions[sender].get('awaiting_course_selection'):
+        if session_key in user_sessions and user_sessions[session_key].get('awaiting_course_selection'):
             try:
                 choice = message.strip()
-                option_map = user_sessions[sender].get('option_map', {})
+                option_map = user_sessions[session_key].get('option_map', {})
                 
                 if choice in option_map:
                     folder_id = option_map[choice]
-                    folders = user_sessions[sender]['folders']
+                    folders = user_sessions[session_key]['folders']
                     folder_name = next((f['name'] for f in folders if f['id'] == folder_id), "Selected Course")
-                    del user_sessions[sender]
+                    del user_sessions[session_key]  # Clear the session after use
                     
                     folder_url = f"https://drive.google.com/drive/folders/{folder_id}"
                     send_whatsapp_message(f"📂 {folder_name}\n\n{folder_url}")
                 else:
                     send_whatsapp_message("❌ Invalid choice. Please select one of the available options.")
-                    query = user_sessions[sender].get('query', None)
-                    send_course_options(sender, query)
+                    query = user_sessions[session_key].get('query', None)
+                    send_course_options(session_key, query)
                 return jsonify({'status': 'processed'})
             except Exception as e:
                 logger.error(f"Error processing course choice: {str(e)}")
@@ -752,12 +747,12 @@ Paste any video URL (YouTube, Instagram, TikTok, Facebook, Pinterest, Google Dri
             if not query:
                 send_whatsapp_message("Please specify a search query or 'all' to list all courses")
             else:
-                send_course_options(sender, query if query.lower() != 'all' else None)
+                send_course_options(session_key, query if query.lower() != 'all' else None)
         
         # Handle URLs
         elif any(proto in message.lower() for proto in ['http://', 'https://']):
             ensure_files()
-            send_quality_options(sender, message)
+            send_quality_options(session_key, message)
 
         return jsonify({'status': 'processed'})
 
