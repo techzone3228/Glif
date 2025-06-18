@@ -128,10 +128,16 @@ def check_audio(filename):
 # ======================
 def get_available_qualities(url):
     """Check available qualities for videos with improved error handling"""
-    if is_youtube_url(url):
-        return get_youtube_qualities(url)
-    else:
-        return get_other_platform_qualities(url)
+    try:
+        if is_youtube_url(url):
+            return get_youtube_qualities(url)
+        elif is_instagram_url(url):
+            return get_instagram_qualities(url)
+        else:
+            return get_other_platform_qualities(url)
+    except Exception as e:
+        logger.error(f"Error checking available qualities: {str(e)}")
+        return None
 
 def get_youtube_qualities(url):
     """Get YouTube-specific quality options"""
@@ -174,7 +180,58 @@ def get_youtube_qualities(url):
             
     except Exception as e:
         logger.error(f"Error checking YouTube qualities: {str(e)}")
-        return {'best': 'bestvideo+bestaudio/best', 'mp3': 'bestaudio/best'}
+        return None
+
+def get_instagram_qualities(url):
+    """Get Instagram quality options with rate limit handling"""
+    try:
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': False,
+            'force_generic_extractor': True,
+            'cookiefile': IG_COOKIES_FILE if os.path.exists(IG_COOKIES_FILE) else None
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            
+            # Check for Instagram rate limiting
+            if info and info.get('is_live'):
+                raise Exception("Instagram rate limit reached")
+            
+            if not info or 'formats' not in info:
+                return None
+                
+            formats = info.get('formats', [])
+            quality_map = {}
+            
+            for fmt in formats:
+                if fmt.get('vcodec') != 'none':
+                    height = fmt.get('height', 0)
+                    if height >= 1080:
+                        quality_map['1080p'] = fmt['format_id']
+                    elif height >= 720:
+                        quality_map['720p'] = fmt['format_id']
+                    elif height >= 480:
+                        quality_map['480p'] = fmt['format_id']
+                    else:
+                        quality_map['SD'] = fmt['format_id']
+            
+            if quality_map:
+                quality_map['best'] = 'bestvideo+bestaudio/best'
+                quality_map['mp3'] = 'bestaudio/best'
+                return quality_map
+            return None
+            
+    except yt_dlp.utils.DownloadError as e:
+        if 'rate limit' in str(e).lower() or '429' in str(e):
+            raise Exception("Instagram servers are busy. Please try again later.")
+        logger.error(f"Instagram download error: {str(e)}")
+        return None
+    except Exception as e:
+        logger.error(f"Error checking Instagram qualities: {str(e)}")
+        return None
 
 def get_other_platform_qualities(url):
     """Get quality options for non-YouTube platforms"""
@@ -239,7 +296,7 @@ def get_other_platform_qualities(url):
             
     except Exception as e:
         logger.error(f"Error getting other platform formats: {str(e)}")
-        return {'best': 'bestvideo+bestaudio/best', 'mp3': 'bestaudio/best'}
+        return None
 
 def download_media(url, quality, format_id=None):
     """Download media with selected quality"""
@@ -314,37 +371,49 @@ def send_quality_options(sender, url):
     """Check available qualities and send options to user or error message"""
     send_whatsapp_message("🔍 Checking available video qualities...")
     
-    quality_map = get_available_qualities(url)
-    if not quality_map:
-        send_whatsapp_message("❌ Could not determine available qualities. Trying default options...")
-        quality_map = {'best': 'bestvideo+bestaudio/best', 'mp3': 'bestaudio/best'}
-    
-    user_sessions[sender] = {
-        'url': url,
-        'quality_map': quality_map,
-        'awaiting_quality': True
-    }
-    
-    options_text = "📺 Available download options:\n\n"
-    option_number = 1
-    option_map = {}
-    
-    for qual in quality_map.keys():
-        if qual == 'mp3' or '(Audio)' in qual:
-            options_text += f"{option_number}. MP3 (Audio only)\n"
-            option_map[str(option_number)] = ('mp3', None)
-        elif qual == 'best':
-            options_text += f"{option_number}. Best available quality\n"
-            option_map[str(option_number)] = ('best', quality_map[qual])
+    try:
+        quality_map = get_available_qualities(url)
+        
+        if quality_map is None:
+            if is_instagram_url(url):
+                send_whatsapp_message("⚠️ Instagram servers are busy. Please try again later.")
+            else:
+                send_whatsapp_message("⚠️ Could not determine available qualities. Please try again later.")
+            return
+        
+        user_sessions[sender] = {
+            'url': url,
+            'quality_map': quality_map,
+            'awaiting_quality': True
+        }
+        
+        options_text = "📺 Available download options:\n\n"
+        option_number = 1
+        option_map = {}
+        
+        for qual in quality_map.keys():
+            if qual == 'mp3' or '(Audio)' in qual:
+                options_text += f"{option_number}. MP3 (Audio only)\n"
+                option_map[str(option_number)] = ('mp3', None)
+            elif qual == 'best':
+                options_text += f"{option_number}. Best available quality\n"
+                option_map[str(option_number)] = ('best', quality_map[qual])
+            else:
+                options_text += f"{option_number}. {qual}\n"
+                option_map[str(option_number)] = (qual, quality_map[qual])
+            option_number += 1
+        
+        options_text += "\nReply with the number of your choice"
+        
+        user_sessions[sender]['option_map'] = option_map
+        send_whatsapp_message(options_text)
+        
+    except Exception as e:
+        logger.error(f"Error in send_quality_options: {str(e)}")
+        if is_instagram_url(url):
+            send_whatsapp_message("⚠️ Instagram servers are busy. Please try again later.")
         else:
-            options_text += f"{option_number}. {qual}\n"
-            option_map[str(option_number)] = (qual, quality_map[qual])
-        option_number += 1
-    
-    options_text += "\nReply with the number of your choice"
-    
-    user_sessions[sender]['option_map'] = option_map
-    send_whatsapp_message(options_text)
+            send_whatsapp_message("⚠️ Error checking video qualities. Please try again later.")
 
 # ======================
 # GOOGLE DRIVE FUNCTIONS
@@ -615,35 +684,40 @@ def handle_webhook():
             help_text = """👋 Hi! Here's what I can do:
 
 📥 Media Download:
-Paste any video URL (YouTube, Instagram, etc.) to download
+Paste any video URL (YouTube, Instagram, TikTok, Facebook, Pinterest, Google Drive etc.) to download
 
 🔍 Search:
 /search [query] - Search YouTube for videos
-/thumb [YouTube URL] - Get YouTube video thumbnail
 
 📚 Courses:
 /course [query] - Search for courses
 /course all - List all available courses
+
+🎨 Thumbnails:
+/thumb [YouTube URL] - Get YouTube video thumbnail
 
 ℹ️ Help:
 /help - Show this message"""
             send_whatsapp_message(help_text)
         
         elif message.lower().startswith(('/help', 'help', 'info')):
-            help_text = """ℹ️ Available Commands:
+            help_text = """👋 Hi! Here's what I can do:
 
 📥 Media Download:
-Paste any video URL to download
+Paste any video URL (YouTube, Instagram, TikTok, Facebook, Pinterest, Google Drive etc.) to download
 
 🔍 Search:
-/search [query] - Search YouTube
-/thumb [YouTube URL] - Get thumbnail
+/search [query] - Search YouTube for videos
 
 📚 Courses:
-/course [query] - Find courses
-/course all - All courses
+/course [query] - Search for courses
+/course all - List all available courses
 
-Type any command to get started"""
+🎨 Thumbnails:
+/thumb [YouTube URL] - Get YouTube video thumbnail
+
+ℹ️ Help:
+/help - Show this message"""
             send_whatsapp_message(help_text)
         
         elif message.lower().startswith('/search '):
