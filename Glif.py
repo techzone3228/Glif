@@ -27,8 +27,8 @@ GREEN_API = {
     "mediaUrl": "https://7105.media.greenapi.com"
 }
 AUTHORIZED_GROUP = "120363421227499361@g.us"
-BOT_NUMBER = "13656174559"
-ADMIN_NUMBER = "923190779215"  # Only this number can use /reset in private chat
+BOT_NUMBER = "923400315734"
+ADMIN_NUMBER = "923247220362"  # Only this number can use /reset in private chat
 
 # Cookie configuration
 IG_COOKIES_FILE = "igcookies.txt"
