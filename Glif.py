@@ -30,6 +30,17 @@ AUTHORIZED_GROUP = "120363421227499361@g.us"
 BOT_NUMBER = "923400315734@c.us"
 ADMIN_NUMBER = "923247220362@c.us"  # Admin can use bot in personal chat
 
+# GLIF Configuration (Admin-only thumbnail generation)
+GLIF_ID = "cm0zceq2a00023f114o6hti7w"
+GLIF_TOKENS = [
+    "glif_a4ef6d3aa5d8575ea8448b29e293919a42a6869143fcbfc32f2e4a7dbe53199a",
+    "glif_51d216db54438b777c4170cd8913d628ff0af09789ed5dbcbd718fa6c6968bb1",
+    "glif_c9dc66b31537b5a423446bbdead5dc2dbd73dc1f4a5c47a9b77328abcbc7b755",
+    "glif_f5a55ee6d767b79f2f3af01c276ec53d14475eace7cabf34b22f8e5968f3fef5",
+    "glif_c3a7fd4779b59f59c08d17d4a7db46beefa3e9e49a9ebc4921ecaca35c556ab7",
+    "glif_b31fdc2c9a7aaac0ec69d5f59bf05ccea0c5786990ef06b79a1d7db8e37ba317"
+]
+
 # Cookie configuration
 IG_COOKIES_FILE = "igcookies.txt"
 IG_COOKIES_DRIVE_URL = "https://drive.google.com/uc?export=download&id=13kNOfYmC8kZEE9Le786ndnZbdPpGBtEX"
@@ -148,19 +159,19 @@ def get_estimated_size(url, quality):
                 bitrate = 0
                 
                 if quality == 'mp3':
-                    bitrate = 192
+                    bitrate = 192  # kbps
                 elif quality == '144p':
-                    bitrate = 200
+                    bitrate = 200  # kbps
                 elif quality == '360p':
-                    bitrate = 500
+                    bitrate = 500  # kbps
                 elif quality == '480p':
-                    bitrate = 1000
+                    bitrate = 1000 # kbps
                 elif quality == '720p':
-                    bitrate = 2500
+                    bitrate = 2500 # kbps
                 elif quality == '1080p':
-                    bitrate = 5000
-                else:
-                    bitrate = 8000
+                    bitrate = 5000 # kbps
+                else:  # best or unknown
+                    bitrate = 8000 # kbps
                 
                 estimated_size = (bitrate * 1000 * duration) / 8
                 return estimated_size
@@ -567,6 +578,27 @@ def get_youtube_thumbnail(url):
         logger.error(f"Thumbnail error: {str(e)}")
         return None
 
+def generate_thumbnail(prompt):
+    """Generate thumbnail using GLIF API (Admin only)"""
+    prompt = prompt[:100]  # Limit prompt length
+    for token in GLIF_TOKENS:
+        try:
+            response = requests.post(
+                f"https://simple-api.glif.app/{GLIF_ID}",
+                headers={"Authorization": f"Bearer {token}"},
+                json={"prompt": prompt, "style": "youtube_trending"},
+                timeout=30
+            )
+            data = response.json()
+            
+            for key in ["output", "image_url", "url"]:
+                if key in data and isinstance(data[key], str) and data[key].startswith('http'):
+                    logger.info(f"Generated thumbnail using token {token[-6:]}")
+                    return {'status': 'success', 'image_url': data[key]}
+        except Exception as e:
+            logger.warning(f"GLIF token {token[-6:]} failed: {str(e)}")
+    return {'status': 'error'}
+
 def process_user_message(session_key, message, chat_id, sender):
     """Process user message in thread"""
     try:
@@ -657,10 +689,13 @@ _(Max file size: 100MB)_
 `/course all` - List all available courses
 
 🎨 *Thumbnails:*
-`/thumb [YouTube URL]` - Get YouTube video thumbnail
+`/thumb [YouTube URL]` - Get YouTube video thumbnail"""
 
-ℹ️ *Help:*
-`/help` - Show this message"""
+            # Add GLIF command only for admin in private chat
+            if sender == ADMIN_NUMBER and not chat_id.endswith('@g.us'):
+                help_text += "\n\n🔧 *Admin Commands:*\n`/glif [prompt]` - Generate custom thumbnail"
+
+            help_text += "\n\nℹ️ *Help:*\n`/help` - Show this message"
             send_whatsapp_message(help_text, target_chat)
         
         elif message.lower().startswith(('/help', 'help', 'info')):
@@ -683,9 +718,13 @@ _(Maximum file size: 100MB)_
 `/course all` - List all courses
 
 🎨 *Thumbnail Tools:*
-`/thumb [URL]` - Get YouTube thumbnail
+`/thumb [URL]` - Get YouTube thumbnail"""
 
-Need more help? Contact admin!"""
+            # Add GLIF command only for admin in private chat
+            if sender == ADMIN_NUMBER and not chat_id.endswith('@g.us'):
+                help_text += "\n\n🔧 *Admin Commands:*\n`/glif [prompt]` - Generate custom thumbnail"
+
+            help_text += "\n\nNeed more help? Contact admin!"
             send_whatsapp_message(help_text, target_chat)
         
         elif message.lower().startswith('/search '):
@@ -721,6 +760,23 @@ Need more help? Contact admin!"""
                 send_whatsapp_message("ℹ️ *Please specify a search query or* `all` *to list all courses*", target_chat)
             else:
                 send_course_options(session_key, query if query.lower() != 'all' else None, target_chat)
+        
+        # GLIF command (Admin only in private chat)
+        elif message.lower().startswith('/glif ') and sender == ADMIN_NUMBER and not chat_id.endswith('@g.us'):
+            prompt = message[6:].strip()
+            if prompt:
+                send_whatsapp_message("🔄 *Generating your thumbnail...* _(20-30 seconds)_", target_chat)
+                result = generate_thumbnail(prompt)
+                if result['status'] == 'success':
+                    response = requests.get(result['image_url'])
+                    temp_file = os.path.join(tempfile.gettempdir(), "thumbnail.jpg")
+                    with open(temp_file, 'wb') as f:
+                        f.write(response.content)
+                    send_whatsapp_file(temp_file, f"🎨 *Thumbnail for:* _{prompt}_", chat_id=target_chat)
+                    send_whatsapp_message(f"🔗 *Direct URL:*\n{result['image_url']}", target_chat)
+                    os.remove(temp_file)
+                else:
+                    send_whatsapp_message("❌ *Failed to generate. Please try different keywords.*", target_chat)
         
         # Handle URLs
         elif any(proto in message.lower() for proto in ['http://', 'https://']):
@@ -798,6 +854,7 @@ if __name__ == '__main__':
     And admin ({ADMIN_NUMBER}) in personal chat
     Ignoring messages from: {BOT_NUMBER}
     GreenAPI Instance: {GREEN_API['idInstance']}
+    GLIF Thumbnails: Enabled (Admin only)
     Max file size: 100MB
     ============================================
     """)
