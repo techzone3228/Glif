@@ -27,8 +27,8 @@ GREEN_API = {
     "mediaUrl": "https://7105.media.greenapi.com"
 }
 AUTHORIZED_GROUP = "120363421227499361@g.us"
-BOT_NUMBER = "923400315734"
-ADMIN_NUMBER = "923247220362"  # Admin can use bot in personal chat
+BOT_NUMBER = "923400315734@c.us"
+ADMIN_NUMBER = "923247220362@c.us"  # Admin can use bot in personal chat
 
 # Cookie configuration
 IG_COOKIES_FILE = "igcookies.txt"
@@ -140,31 +140,28 @@ def get_estimated_size(url, quality):
             if not info:
                 return None
                 
-            # Try to get filesize if available
             if 'filesize' in info and info['filesize']:
                 return info['filesize']
                 
-            # Estimate from duration and format
             if 'duration' in info and 'format' in info:
                 duration = info['duration']
                 bitrate = 0
                 
                 if quality == 'mp3':
-                    bitrate = 192  # kbps
+                    bitrate = 192
                 elif quality == '144p':
-                    bitrate = 200  # kbps
+                    bitrate = 200
                 elif quality == '360p':
-                    bitrate = 500  # kbps
+                    bitrate = 500
                 elif quality == '480p':
-                    bitrate = 1000 # kbps
+                    bitrate = 1000
                 elif quality == '720p':
-                    bitrate = 2500 # kbps
+                    bitrate = 2500
                 elif quality == '1080p':
-                    bitrate = 5000 # kbps
-                else:  # best or unknown
-                    bitrate = 8000 # kbps
+                    bitrate = 5000
+                else:
+                    bitrate = 8000
                 
-                # Calculate estimated size in bytes
                 estimated_size = (bitrate * 1000 * duration) / 8
                 return estimated_size
                 
@@ -307,9 +304,8 @@ def get_other_platform_qualities(url):
 def download_media(url, quality, format_id=None):
     """Download media with selected quality"""
     try:
-        # First try to estimate size before downloading
         estimated_size = get_estimated_size(url, quality)
-        if estimated_size and estimated_size > 100 * 1024 * 1024:  # 100MB
+        if estimated_size and estimated_size > 100 * 1024 * 1024:
             return None, "📛 *File size exceeds 100MB limit*"
         
         temp_dir = tempfile.mkdtemp()
@@ -352,7 +348,6 @@ def download_media(url, quality, format_id=None):
             info = ydl.extract_info(url, download=True)
             filename = ydl.prepare_filename(info)
             
-            # Check actual file size after download
             if os.path.exists(filename) and os.path.getsize(filename) > 100 * 1024 * 1024:
                 os.remove(filename)
                 return None, "📛 *File size exceeds 100MB limit*"
@@ -430,7 +425,7 @@ def send_quality_options(session_key, url, chat_id=None):
                 'quality_map': quality_map,
                 'awaiting_quality': True,
                 'option_map': {},
-                'chat_id': chat_id  # Store the chat_id for responses
+                'chat_id': chat_id
             }
             
             options_text = "📺 *Available download options (Max 100MB):*\n\n"
@@ -470,7 +465,7 @@ def send_course_options(session_key, query=None, chat_id=None):
                 'folders': folders,
                 'awaiting_course_selection': True,
                 'option_map': {},
-                'chat_id': chat_id  # Store the chat_id for responses
+                'chat_id': chat_id
             }
             
             options_text = "📚 *Available Courses (A-Z):*\n\n"
@@ -579,7 +574,7 @@ def process_user_message(session_key, message, chat_id, sender):
             session_data = user_sessions.get(session_key, {})
         
         # Get the target chat ID (group or personal)
-        target_chat = chat_id if chat_id.endswith('@g.us') else sender
+        target_chat = chat_id
         
         # Handle quality selection
         if session_data.get('awaiting_quality'):
