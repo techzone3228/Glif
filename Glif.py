@@ -12,7 +12,6 @@ from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from bs4 import BeautifulSoup
 
 app = Flask(__name__)
 
@@ -20,8 +19,8 @@ app = Flask(__name__)
 # CONFIGURATION
 # ======================
 GREEN_API = {
-    "idInstance": "7105261536",
-    "apiToken": "13a4bbfd70394a1c862c5d709671333fb1717111737a4f7998",
+    "idInstance": "7105258364",
+    "apiToken": "9f9e1a1a2611446baed68fd648dba823d34e655958e54b28bb",
     "apiUrl": "https://7105.api.greenapi.com",
     "mediaUrl": "https://7105.media.greenapi.com"
 }
@@ -134,83 +133,6 @@ def check_audio(filename):
     except Exception as e:
         logger.error(f"Error checking audio: {str(e)}")
         return False
-
-def get_live_cricket_scores():
-    """Fetch live cricket scores from Cricbuzz"""
-    try:
-        url = "https://www.cricbuzz.com/cricket-match/live-scores"
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept-Language": "en-US,en;q=0.9"
-        }
-        response = requests.get(url, headers=headers, timeout=10)
-        response.raise_for_status()
-        
-        soup = BeautifulSoup(response.text, 'html.parser')
-        matches = []
-        match_items = soup.find_all('div', class_='cb-mtch-lst')
-        
-        for item in match_items:
-            try:
-                teams = item.find('h3').get_text(strip=True)
-                score_div = item.find('div', class_='cb-scr-wll-chvrn')
-                score = score_div.get_text(' | ', strip=True) if score_div else "Score not available"
-                
-                status_div = item.find('div', class_='cb-text-live') or item.find('div', class_='cb-text-complete')
-                status = status_div.get_text(strip=True) if status_div else "In Progress"
-                
-                venue = None
-                venue_div = item.find('div', class_='cb-font-12')
-                if venue_div:
-                    venue_text = venue_div.get_text(strip=True)
-                    if '• at ' in venue_text:
-                        venue = venue_text.split('• at ')[-1]
-                
-                matches.append({
-                    'teams': teams,
-                    'score': score,
-                    'status': status,
-                    'venue': venue
-                })
-            except Exception:
-                continue
-                
-        return matches
-    except Exception as e:
-        logger.error(f"Error fetching cricket scores: {str(e)}")
-        return None
-
-def get_weather_data(city):
-    """Fetch weather data for a city"""
-    try:
-        API_KEY = "81b37bb82aeaf67bc328dc8e1815dbcd"
-        base_url = "http://api.openweathermap.org/data/2.5/weather"
-        params = {
-            'q': city,
-            'appid': API_KEY,
-            'units': 'metric'
-        }
-        
-        response = requests.get(base_url, params=params)
-        response.raise_for_status()
-        data = response.json()
-        
-        if data.get('cod') != 200:
-            return None
-            
-        return {
-            'city': data['name'],
-            'country': data['sys']['country'],
-            'temp': data['main']['temp'],
-            'feels_like': data['main']['feels_like'],
-            'description': data['weather'][0]['description'].capitalize(),
-            'humidity': data['main']['humidity'],
-            'wind': data['wind']['speed'],
-            'time': datetime.fromtimestamp(data['dt']).strftime('%A, %I:%M %p')
-        }
-    except Exception as e:
-        logger.error(f"Error fetching weather data: {str(e)}")
-        return None
 
 # ======================
 # VIDEO QUALITY FUNCTIONS
@@ -804,12 +726,6 @@ Paste any video URL (YouTube, Instagram, etc.) to download
 🎨 Thumbnails:
 /glif [prompt] - Generate custom thumbnail
 
-🏏 Cricket:
-/cricket - Get live cricket scores
-
-⛅ Weather:
-/weather [city] - Get weather forecast
-
 ℹ️ Help:
 /help - Show this message"""
             send_whatsapp_message(help_text)
@@ -830,12 +746,6 @@ Paste any video URL to download
 
 🎨 Thumbnails:
 /glif [prompt] - Generate thumbnail
-
-🏏 Cricket:
-/cricket - Live scores
-
-⛅ Weather:
-/weather [city] - Weather forecast
 
 Type any command to get started"""
             send_whatsapp_message(help_text)
@@ -890,52 +800,6 @@ Type any command to get started"""
             else:
                 send_course_options(sender, query if query.lower() != 'all' else None)
         
-        elif message.lower() == '/cricket':
-            send_whatsapp_message("🏏 Fetching live cricket scores...")
-            matches = get_live_cricket_scores()
-            if matches:
-                response = "🏏 LIVE CRICKET SCORES\n"
-                response += f"🕒 Updated: {datetime.now().strftime('%H:%M:%S')}\n\n"
-                
-                for match in matches:
-                    response += f"⚔️ {match['teams']}\n"
-                    response += f"📊 {match['score']}\n"
-                    if match['venue']:
-                        response += f"📍 {match['venue']}\n"
-                    
-                    if 'won' in match['status'].lower():
-                        response += f"🏆 {match['status']}\n"
-                    elif 'live' in match['status'].lower():
-                        response += f"🔴 {match['status']}\n"
-                    else:
-                        response += f"🟢 {match['status']}\n"
-                    response += "―"*20 + "\n"
-                
-                send_whatsapp_message(response)
-            else:
-                send_whatsapp_message("❌ No live matches currently available or failed to fetch scores.")
-        
-        elif message.lower().startswith('/weather '):
-            city = message[9:].strip()
-            if city:
-                send_whatsapp_message(f"⛅ Fetching weather for {city}...")
-                weather = get_weather_data(city)
-                if weather:
-                    response = "🌦️ Weather Information 🌦️\n"
-                    response += "―"*25 + "\n"
-                    response += f"📍 {weather['city']}, {weather['country']}\n"
-                    response += f"⏰ {weather['time']}\n"
-                    response += f"🌡️ Temp: {weather['temp']}°C (Feels like {weather['feels_like']}°C)\n"
-                    response += f"☁️ {weather['description']}\n"
-                    response += f"💧 Humidity: {weather['humidity']}%\n"
-                    response += f"🌬️ Wind: {weather['wind']} m/s\n"
-                    response += "―"*25
-                    send_whatsapp_message(response)
-                else:
-                    send_whatsapp_message("❌ Couldn't fetch weather data. Please check the city name.")
-            else:
-                send_whatsapp_message("❌ Please specify a city name after /weather")
-
         # Handle URLs
         elif any(proto in message.lower() for proto in ['http://', 'https://']):
             ensure_files()
@@ -979,3 +843,7 @@ if __name__ == '__main__':
     ============================================
     """)
     serve(app, host='0.0.0.0', port=8000)
+
+
+
+note this script and wait for my next instructions 
