@@ -848,7 +848,7 @@ _(Maximum file size: 100MB)_
                     else:
                         response_text += f"🟢 {match['status']}\n"
                     response_text += "-------------------------\n"
-                response_text += "\n_Data from Cricbuzz_"
+                response_text += "\n_Data for live Cricket Scores_"
                 send_whatsapp_message(response_text, target_chat)
             else:
                 send_whatsapp_message("❌ No live matches found or unable to fetch scores", target_chat)
@@ -869,7 +869,7 @@ _(Maximum file size: 100MB)_
                     response_text += f"☁️ {weather['description'].capitalize()}\n"
                     response_text += f"💧 Humidity: {main['humidity']}%\n"
                     response_text += f"🌬️ Wind: {weather_data['wind']['speed']} m/s\n"
-                    response_text += "\n_Data from OpenWeatherMap_"
+                    response_text += "\n_Times Are In GMT_"
                     send_whatsapp_message(response_text, target_chat)
                 else:
                     send_whatsapp_message(f"❌ Couldn't fetch weather for {city}. Check city name.", target_chat)
