@@ -14,7 +14,7 @@ from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from concurrent.futures import ThreadPoolExecutor
-from bs4 import BeautifulSoup  # New import for cricket scores
+from bs4 import BeautifulSoup
 
 app = Flask(__name__)
 
@@ -41,6 +41,11 @@ GLIF_TOKENS = [
     "glif_c3a7fd4779b59f59c08d17d4a7db46beefa3e9e49a9ebc4921ecaca35c556ab7",
     "glif_b31fdc2c9a7aaac0ec69d5f59bf05ccea0c5786990ef06b79a1d7db8e37ba317"
 ]
+
+# Wikipedia Configuration
+WIKIPEDIA_BASE_URL = "https://en.wikipedia.org/"
+WIKIPEDIA_API_PDF = "api/rest_v1/page/pdf/"
+WIKIPEDIA_API_SEARCH = "w/api.php?action=opensearch&search="
 
 # Cookie configuration
 IG_COOKIES_FILE = "igcookies.txt"
@@ -412,7 +417,7 @@ def send_whatsapp_file(file_path, caption, is_video=False, chat_id=None):
             response = requests.post(
                 f"{GREEN_API['mediaUrl']}/waInstance{GREEN_API['idInstance']}/sendFileByUpload/{GREEN_API['apiToken']}",
                 files={'file': (os.path.basename(file_path), file, 
-                      'video/mp4' if is_video else 'audio/mpeg' if file_path.endswith('.mp3') else 'image/jpeg')},
+                      'video/mp4' if is_video else 'audio/mpeg' if file_path.endswith('.mp3') else 'application/pdf' if file_path.endswith('.pdf') else 'image/jpeg')},
                 data={'chatId': target_chat, 'caption': caption}
             )
             response.raise_for_status()
@@ -659,6 +664,66 @@ def get_weather_data(city):
         logger.error(f"Weather data error: {str(e)}")
         return None
 
+def fix_wikipedia_title(title):
+    """Formats the title for Wikipedia API"""
+    return title.strip().replace(" ", "_")
+
+def search_wikipedia(query):
+    """Search Wikipedia for similar titles"""
+    url = WIKIPEDIA_BASE_URL + WIKIPEDIA_API_SEARCH + query.replace(" ", "%20")
+    try:
+        response = requests.get(url, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+        return data[1]  # Returns list of suggested titles
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Wikipedia search error: {str(e)}")
+        return []
+
+def download_wikipedia_pdf(title, chat_id=None):
+    """Downloads a Wikipedia page as PDF and sends to user"""
+    formatted_title = fix_wikipedia_title(title)
+    url = WIKIPEDIA_BASE_URL + WIKIPEDIA_API_PDF + formatted_title
+    temp_dir = tempfile.mkdtemp()
+    filename = os.path.join(temp_dir, f"{formatted_title}.pdf")
+    
+    try:
+        response = requests.get(url, stream=True, timeout=20)
+        response.raise_for_status()
+        
+        with open(filename, 'wb') as pdf_file:
+            for chunk in response.iter_content(chunk_size=4096):
+                if chunk:
+                    pdf_file.write(chunk)
+        
+        # Check if file was downloaded successfully
+        if os.path.exists(filename) and os.path.getsize(filename) > 0:
+            return filename, None
+        else:
+            os.remove(filename)
+            return None, "Failed to download PDF"
+            
+    except requests.exceptions.RequestException as e:
+        logger.error(f"Wikipedia PDF download error: {str(e)}")
+        suggestions = search_wikipedia(title)
+        
+        if suggestions:
+            with session_lock:
+                user_sessions[f"wiki_{chat_id}"] = {
+                    'suggestions': suggestions[:5],
+                    'awaiting_wiki_selection': True,
+                    'chat_id': chat_id
+                }
+            
+            suggestions_text = "🔍 *Wikipedia suggestions:*\n\n"
+            for i, suggestion in enumerate(suggestions[:5], 1):
+                suggestions_text += f"{i}. {suggestion}\n"
+            suggestions_text += "\nReply with the number to download"
+            
+            return None, suggestions_text
+        else:
+            return None, "❌ Article not found and no suggestions available"
+
 def process_user_message(session_key, message, chat_id, sender):
     """Process user message in thread"""
     try:
@@ -668,6 +733,33 @@ def process_user_message(session_key, message, chat_id, sender):
         # Get the target chat ID (group or personal)
         target_chat = chat_id
         
+        # Handle Wikipedia suggestion selection
+        if session_data.get('awaiting_wiki_selection'):
+            choice = message.strip()
+            suggestions = session_data.get('suggestions', [])
+            
+            if choice.isdigit() and 0 < int(choice) <= len(suggestions):
+                selected_title = suggestions[int(choice)-1]
+                with session_lock:
+                    if session_key in user_sessions:
+                        del user_sessions[session_key]
+                
+                send_whatsapp_message(f"⬇️ Downloading: {selected_title}", target_chat)
+                pdf_path, error_msg = download_wikipedia_pdf(selected_title, target_chat)
+                
+                if pdf_path:
+                    send_whatsapp_file(pdf_path, f"📚 *Wikipedia Article*\n{selected_title}", chat_id=target_chat)
+                    os.remove(pdf_path)
+                    os.rmdir(os.path.dirname(pdf_path))
+                else:
+                    send_whatsapp_message(f"❌ {error_msg}", target_chat)
+            else:
+                send_whatsapp_message("❌ Invalid selection. Please try again with /wikipdf", target_chat)
+                with session_lock:
+                    if session_key in user_sessions:
+                        del user_sessions[session_key]
+            return
+
         # Handle quality selection
         if session_data.get('awaiting_quality'):
             choice = message.strip()
@@ -755,7 +847,10 @@ _(Max file size: 100MB)_
 `/cricket` - Get live cricket scores
 
 ⛅ *Weather:*
-`/weather [city]` - Get current weather"""
+`/weather [city]` - Get current weather
+
+📚 *Wikipedia:*
+`/wikipdf [article]` - Get Wikipedia article as PDF"""
 
             # Add GLIF command only for admin in private chat
             if sender == ADMIN_NUMBER and not chat_id.endswith('@g.us'):
@@ -790,7 +885,10 @@ _(Maximum file size: 100MB)_
 `/cricket` - Live cricket matches
 
 ⛅ *Weather Updates:*
-`/weather [city]` - Current weather"""
+`/weather [city]` - Current weather
+
+📚 *Wikipedia Articles:*
+`/wikipdf [article]` - Download as PDF"""
 
             # Add GLIF command only for admin in private chat
             if sender == ADMIN_NUMBER and not chat_id.endswith('@g.us'):
@@ -848,7 +946,7 @@ _(Maximum file size: 100MB)_
                     else:
                         response_text += f"🟢 {match['status']}\n"
                     response_text += "-------------------------\n"
-                response_text += "\n_Data for live Cricket Scores_"
+                response_text += "\n_Data from Cricbuzz_"
                 send_whatsapp_message(response_text, target_chat)
             else:
                 send_whatsapp_message("❌ No live matches found or unable to fetch scores", target_chat)
@@ -869,12 +967,27 @@ _(Maximum file size: 100MB)_
                     response_text += f"☁️ {weather['description'].capitalize()}\n"
                     response_text += f"💧 Humidity: {main['humidity']}%\n"
                     response_text += f"🌬️ Wind: {weather_data['wind']['speed']} m/s\n"
-                    response_text += "\n_Times Are In GMT_"
+                    response_text += "\n_Data from OpenWeatherMap_"
                     send_whatsapp_message(response_text, target_chat)
                 else:
                     send_whatsapp_message(f"❌ Couldn't fetch weather for {city}. Check city name.", target_chat)
             else:
                 send_whatsapp_message("ℹ️ Please specify a city (e.g. /weather London)", target_chat)
+        
+        elif message.lower().startswith('/wikipdf '):
+            article = message[9:].strip()
+            if article:
+                send_whatsapp_message(f"📚 Downloading Wikipedia article: {article}", target_chat)
+                pdf_path, error_msg = download_wikipedia_pdf(article, target_chat)
+                
+                if pdf_path:
+                    send_whatsapp_file(pdf_path, f"📚 *Wikipedia Article*\n{article}", chat_id=target_chat)
+                    os.remove(pdf_path)
+                    os.rmdir(os.path.dirname(pdf_path))
+                else:
+                    send_whatsapp_message(f"❌ {error_msg}", target_chat)
+            else:
+                send_whatsapp_message("ℹ️ Please specify an article title (e.g. /wikipdf Python)", target_chat)
         
         # GLIF command (Admin only in private chat)
         elif message.lower().startswith('/glif ') and sender == ADMIN_NUMBER and not chat_id.endswith('@g.us'):
