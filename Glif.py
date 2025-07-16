@@ -734,15 +734,19 @@ def process_user_message(session_key, message, chat_id, sender):
         target_chat = chat_id
         
         # Handle Wikipedia suggestion selection
-        if session_data.get('awaiting_wiki_selection'):
+        wiki_session_key = f"wiki_{chat_id}"
+        with session_lock:
+            wiki_session_data = user_sessions.get(wiki_session_key, {})
+        
+        if wiki_session_data.get('awaiting_wiki_selection'):
             choice = message.strip()
-            suggestions = session_data.get('suggestions', [])
+            suggestions = wiki_session_data.get('suggestions', [])
             
             if choice.isdigit() and 0 < int(choice) <= len(suggestions):
                 selected_title = suggestions[int(choice)-1]
                 with session_lock:
-                    if session_key in user_sessions:
-                        del user_sessions[session_key]
+                    if wiki_session_key in user_sessions:
+                        del user_sessions[wiki_session_key]
                 
                 send_whatsapp_message(f"⬇️ Downloading: {selected_title}", target_chat)
                 pdf_path, error_msg = download_wikipedia_pdf(selected_title, target_chat)
@@ -756,8 +760,8 @@ def process_user_message(session_key, message, chat_id, sender):
             else:
                 send_whatsapp_message("❌ Invalid selection. Please try again with /wikipdf", target_chat)
                 with session_lock:
-                    if session_key in user_sessions:
-                        del user_sessions[session_key]
+                    if wiki_session_key in user_sessions:
+                        del user_sessions[wiki_session_key]
             return
 
         # Handle quality selection
@@ -977,7 +981,7 @@ _(Maximum file size: 100MB)_
         elif message.lower().startswith('/wikipdf '):
             article = message[9:].strip()
             if article:
-                send_whatsapp_message(f"📚 Downloading Wikipedia article: {article}", target_chat)
+                send_whatsapp_message(f"📚 Searching Wikipedia for: {article}", target_chat)
                 pdf_path, error_msg = download_wikipedia_pdf(article, target_chat)
                 
                 if pdf_path:
@@ -1014,6 +1018,7 @@ _(Maximum file size: 100MB)_
     except Exception as e:
         logger.error(f"Message processing error: {str(e)}")
         send_whatsapp_message("❌ *An error occurred. Please try again.*", target_chat)
+                
 
 @app.route('/webhook', methods=['POST'])
 def handle_webhook():
