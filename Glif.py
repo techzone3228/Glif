@@ -200,20 +200,13 @@ def get_available_qualities(url):
         return None
 
 def get_youtube_qualities(url):
-    """Get YouTube quality options with EXACT quality mapping"""
+    """Get YouTube quality options"""
     try:
         ydl_opts = {
             'quiet': True,
             'no_warnings': True,
             'extract_flat': False,
-            'cookiefile': YT_COOKIES_FILE if os.path.exists(YT_COOKIES_FILE) else None,
-            "extractor_args": {
-                "youtube": {
-                    "player_skip": ["configs"],
-                    "player_client": ["ios", "android", "web_safari", "web"]
-                }
-            },
-            "nocheckcertificate": True,
+            'cookiefile': YT_COOKIES_FILE if os.path.exists(YT_COOKIES_FILE) else None
         }
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -221,39 +214,19 @@ def get_youtube_qualities(url):
             if not info or 'formats' not in info:
                 return None
             
-            # EXACT QUALITY MAPPING - Find best format for each quality
             quality_map = {}
-            formats = info.get('formats', [])
-            
-            # Sort formats by quality (height) and bitrate
-            video_formats = [f for f in formats if f.get('vcodec') != 'none' and f.get('acodec') != 'none']
-            video_formats.sort(key=lambda x: (x.get('height', 0), x.get('tbr', 0)), reverse=True)
-            
-            # Map qualities to specific format IDs
-            quality_targets = {
-                '144p': (140, 144),
-                '360p': (230, 360),
-                '480p': (370, 480),
-                '720p': (550, 720),
-                '1080p': (870, 1080)
-            }
-            
-            for quality, (min_h, max_h) in quality_targets.items():
-                for fmt in video_formats:
+            for fmt in info.get('formats', []):
+                if fmt.get('vcodec') != 'none':
                     height = fmt.get('height', 0)
-                    format_id = fmt.get('format_id', '')
-                    # Find the best format in this quality range
-                    if min_h <= height <= max_h:
-                        if quality not in quality_map:
-                            quality_map[quality] = format_id
-                            break
+                    if height >= 1080: quality_map['1080p'] = fmt['format_id']
+                    if height >= 720: quality_map['720p'] = fmt['format_id']
+                    if height >= 480: quality_map['480p'] = fmt['format_id']
+                    if height >= 360: quality_map['360p'] = fmt['format_id']
+                    if height >= 144: quality_map['144p'] = fmt['format_id']
             
-            # Add best quality options
-            quality_map['best'] = 'best'
+            quality_map['best'] = 'bestvideo+bestaudio/best'
             quality_map['mp3'] = 'bestaudio/best'
-            
-            logger.info(f"Available qualities mapped: {quality_map}")
-            return quality_map
+            return {q: quality_map[q] for q in ['144p', '360p', '480p', '720p', '1080p', 'best', 'mp3'] if q in quality_map}
     except Exception as e:
         logger.error(f"YouTube quality error: {str(e)}")
         return None
@@ -346,34 +319,28 @@ def get_other_platform_qualities(url):
         return None
 
 def download_media(url, quality, format_id=None):
-    """Download media with selected quality - UPDATED VERSION"""
+    """Download media with selected quality"""
     try:
         estimated_size = get_estimated_size(url, quality)
         if estimated_size and estimated_size > 100 * 1024 * 1024:
             return None, "📛 *File size exceeds 100MB limit*"
         
         temp_dir = tempfile.mkdtemp()
-        
-        # yt-dlp options with modern settings
         ydl_opts = {
-            'outtmpl': os.path.join(temp_dir, '%(title).100s.%(ext)s'),
+            'outtmpl': os.path.join(temp_dir, '%(title)s.%(ext)s'),
             'merge_output_format': 'mp4',
+            'postprocessors': [
+                {'key': 'FFmpegVideoConvertor', 'preferedformat': 'mp4'},
+                {'key': 'FFmpegMetadata'},
+                {'key': 'EmbedThumbnail'}
+            ],
             'quiet': True,
-            'no_warnings': True,
-            'retries': 3,
-            "extractor_args": {
-                "youtube": {
-                    "player_skip": ["configs"],
-                    "player_client": ["ios", "android", "web_safari", "web"]
-                }
-            },
-            "nocheckcertificate": True,
+            'retries': 3
         }
         
         if cookies := get_cookies_for_url(url):
             ydl_opts['cookiefile'] = cookies
         
-        # EXACT QUALITY SELECTION - UPDATED LOGIC
         if quality == 'mp3':
             ydl_opts['format'] = 'bestaudio/best'
             ydl_opts['postprocessors'] = [{
@@ -381,88 +348,50 @@ def download_media(url, quality, format_id=None):
                 'preferredcodec': 'mp3',
                 'preferredquality': '192',
             }]
-        elif quality == 'best':
-            ydl_opts['format'] = 'best[height<=1080]'
         else:
-            # USE SPECIFIC FORMAT ID FOR EXACT QUALITY
-            if format_id and format_id != 'best':
-                ydl_opts['format'] = format_id
+            if is_youtube_url(url):
+                ydl_opts['format'] = {
+                    '144p': 'bestvideo[height<=144]+bestaudio/best',
+                    '360p': 'bestvideo[height<=360]+bestaudio/best',
+                    '480p': 'bestvideo[height<=480]+bestaudio/best',
+                    '720p': 'bestvideo[height<=720]+bestaudio/best',
+                    '1080p': 'bestvideo[height<=1080]+bestaudio/best',
+                    'best': 'bestvideo+bestaudio/best'
+                }.get(quality, 'bestvideo+bestaudio/best')
             else:
-                # Fallback to height-based selection
-                height_map = {
-                    '144p': 'best[height<=144]',
-                    '360p': 'best[height<=360]',
-                    '480p': 'best[height<=480]',
-                    '720p': 'best[height<=720]',
-                    '1080p': 'best[height<=1080]'
-                }
-                ydl_opts['format'] = height_map.get(quality, 'best')
-        
-        logger.info(f"Downloading with quality: {quality}, format: {ydl_opts['format']}")
+                ydl_opts['format'] = format_id or 'bestvideo+bestaudio/best'
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
-            downloaded_files = []
+            filename = ydl.prepare_filename(info)
             
-            # Find all downloaded files
-            for file in os.listdir(temp_dir):
-                if any(file.endswith(ext) for ext in ['.mp4', '.mp3', '.webm', '.m4a']):
-                    file_path = os.path.join(temp_dir, file)
-                    downloaded_files.append(file_path)
-            
-            if not downloaded_files:
-                return None, "No file downloaded"
-            
-            # Use the main file (usually the first one)
-            main_file = downloaded_files[0]
-            file_size = os.path.getsize(main_file)
-            
-            # Check file size limit
-            if file_size > 100 * 1024 * 1024:
-                for f in downloaded_files:
-                    os.remove(f)
+            if os.path.exists(filename) and os.path.getsize(filename) > 100 * 1024 * 1024:
+                os.remove(filename)
                 return None, "📛 *File size exceeds 100MB limit*"
             
-            title = info.get('title', 'Unknown Title')
-            
-            # For MP3, ensure proper extension
-            if quality == 'mp3' and not main_file.endswith('.mp3'):
-                mp3_file = main_file.rsplit('.', 1)[0] + '.mp3'
+            if quality == 'mp3':
+                mp3_file = filename.replace('.webm', '.mp3').replace('.m4a', '.mp3')
                 if os.path.exists(mp3_file):
-                    return mp3_file, title
-                else:
-                    # Convert to MP3 if needed
-                    converted_file = main_file.rsplit('.', 1)[0] + '.mp3'
-                    try:
-                        subprocess.run([
-                            'ffmpeg', '-i', main_file, '-codec:a', 'libmp3lame', 
-                            '-q:a', '2', converted_file, '-y'
-                        ], capture_output=True, timeout=30)
-                        if os.path.exists(converted_file):
-                            os.remove(main_file)
-                            return converted_file, title
-                    except:
-                        pass
-            
-            return main_file, title
-            
+                    if os.path.getsize(mp3_file) > 100 * 1024 * 1024:
+                        os.remove(mp3_file)
+                        return None, "📛 *File size exceeds 100MB limit*"
+                    return mp3_file, info.get('title', 'audio')
+            else:
+                if check_audio(filename):
+                    new_filename = f"{os.path.splitext(filename)[0]}_{quality}.mp4"
+                    os.rename(filename, new_filename)
+                    return new_filename, info.get('title', 'video')
+                
+        return None, None
     except Exception as e:
         logger.error(f"Download error: {str(e)}")
-        return None, f"Download failed: {str(e)}"
+        return None, None
     finally:
-        # Cleanup temp directory - ONLY if no file was returned
         try:
-            if temp_dir and os.path.exists(temp_dir):
-                # Only cleanup if we didn't return a file
-                files_in_dir = os.listdir(temp_dir)
-                if not any(f.endswith(('.mp4', '.mp3', '.webm', '.m4a')) for f in files_in_dir):
-                    for file in files_in_dir:
-                        file_path = os.path.join(temp_dir, file)
-                        if os.path.isfile(file_path):
-                            os.remove(file_path)
-                    os.rmdir(temp_dir)
-        except:
-            pass
+            if os.path.exists(temp_dir) and not os.listdir(temp_dir):
+                os.rmdir(temp_dir)
+        except Exception as e:
+            logger.warning(f"Temp dir cleanup error: {str(e)}")
 
 def send_whatsapp_message(text, chat_id=None):
     """Send text message to authorized group or specified chat"""
@@ -676,6 +605,47 @@ def generate_thumbnail(prompt):
             logger.warning(f"GLIF token {token[-6:]} failed: {str(e)}")
     return {'status': 'error'}
 
+def get_live_cricket_scores():
+    """Fetch live cricket scores from Cricbuzz"""
+    try:
+        url = "https://www.cricbuzz.com/cricket-match/live-scores"
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept-Language": "en-US,en;q=0.9"
+        }
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        matches = []
+        match_items = soup.find_all('div', class_='cb-mtch-lst')
+        
+        for item in match_items:
+            try:
+                # Teams
+                teams = item.find('h3').get_text(strip=True)
+                
+                # Score
+                score_div = item.find('div', class_='cb-scr-wll-chvrn')
+                score = score_div.get_text(' | ', strip=True) if score_div else "Score not available"
+                
+                # Status
+                status_div = item.find('div', class_='cb-text-live') or item.find('div', class_='cb-text-complete')
+                status = status_div.get_text(strip=True) if status_div else "In Progress"
+                
+                matches.append({
+                    'teams': teams,
+                    'score': score,
+                    'status': status
+                })
+            except Exception:
+                continue
+                
+        return matches
+    except Exception as e:
+        logger.error(f"Cricket scores error: {str(e)}")
+        return None
+
 def get_weather_data(city):
     """Fetch weather data from OpenWeatherMap"""
     try:
@@ -702,75 +672,57 @@ def search_wikipedia(query):
     """Search Wikipedia for similar titles"""
     url = WIKIPEDIA_BASE_URL + WIKIPEDIA_API_SEARCH + query.replace(" ", "%20")
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "application/json"
-        }
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, timeout=10)
         response.raise_for_status()
         data = response.json()
         return data[1]  # Returns list of suggested titles
-    except Exception as e:
+    except requests.exceptions.RequestException as e:
         logger.error(f"Wikipedia search error: {str(e)}")
         return []
 
 def download_wikipedia_pdf(title, chat_id=None):
-    """Download Wikipedia page as PDF - UPDATED VERSION"""
-    formatted_title = title.strip().replace(" ", "_")
+    """Downloads a Wikipedia page as PDF and sends to user"""
+    formatted_title = fix_wikipedia_title(title)
     url = WIKIPEDIA_BASE_URL + WIKIPEDIA_API_PDF + formatted_title
     temp_dir = tempfile.mkdtemp()
     filename = os.path.join(temp_dir, f"{formatted_title}.pdf")
     
     try:
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "application/pdf"
-        }
-        
-        response = requests.get(url, headers=headers, stream=True, timeout=30)
-        
-        if response.status_code == 403:
-            return None, "❌ Wikipedia is blocking requests. Try again later."
-        elif response.status_code == 404:
-            return None, "❌ Article not found. Check spelling."
-        
+        response = requests.get(url, stream=True, timeout=20)
         response.raise_for_status()
-        
-        # Check if it's actually a PDF
-        content_type = response.headers.get('content-type', '')
-        if 'pdf' not in content_type.lower():
-            return None, "❌ No PDF available for this article."
         
         with open(filename, 'wb') as pdf_file:
             for chunk in response.iter_content(chunk_size=4096):
                 if chunk:
                     pdf_file.write(chunk)
         
-        # Verify file was downloaded properly
-        if os.path.exists(filename) and os.path.getsize(filename) > 1000:
+        # Check if file was downloaded successfully
+        if os.path.exists(filename) and os.path.getsize(filename) > 0:
             return filename, None
         else:
-            if os.path.exists(filename):
-                os.remove(filename)
-            return None, "❌ Failed to download PDF"
+            os.remove(filename)
+            return None, "Failed to download PDF"
             
     except requests.exceptions.RequestException as e:
         logger.error(f"Wikipedia PDF download error: {str(e)}")
-        
-        # Get suggestions for better error handling
         suggestions = search_wikipedia(title)
+        
         if suggestions:
-            suggestions_text = "🔍 *Did you mean:*\n\n"
+            with session_lock:
+                user_sessions[f"wiki_{chat_id}"] = {
+                    'suggestions': suggestions[:5],
+                    'awaiting_wiki_selection': True,
+                    'chat_id': chat_id
+                }
+            
+            suggestions_text = "🔍 *Wikipedia suggestions:*\n\n"
             for i, suggestion in enumerate(suggestions[:5], 1):
                 suggestions_text += f"{i}. {suggestion}\n"
-            suggestions_text += "\n_Reply with the number to download_"
+            suggestions_text += "\nReply with the number to download"
+            
             return None, suggestions_text
         else:
-            return None, f"❌ Download failed: {str(e)}"
-    
-    except Exception as e:
-        logger.error(f"Unexpected error: {str(e)}")
-        return None, "❌ An unexpected error occurred."
+            return None, "❌ Article not found and no suggestions available"
 
 def process_user_message(session_key, message, chat_id, sender):
     """Process user message in thread"""
@@ -895,6 +847,9 @@ _(Max file size: 100MB)_
 🎨 *Thumbnails:*
 `/thumb [YouTube URL]` - Get YouTube video thumbnail
 
+🏏 *Cricket Scores:*
+`/cricket` - Get live cricket scores
+
 ⛅ *Weather:*
 `/weather [city]` - Get current weather
 
@@ -929,6 +884,9 @@ _(Maximum file size: 100MB)_
 
 🎨 *Thumbnail Tools:*
 `/thumb [URL]` - Get YouTube thumbnail
+
+🏏 *Cricket Scores:*
+`/cricket` - Live cricket matches
 
 ⛅ *Weather Updates:*
 `/weather [city]` - Current weather
@@ -976,6 +934,26 @@ _(Maximum file size: 100MB)_
                 send_whatsapp_message("ℹ️ *Please specify a search query or* `all` *to list all courses*", target_chat)
             else:
                 send_course_options(session_key, query if query.lower() != 'all' else None, target_chat)
+        
+        elif message.lower().startswith('/cricket'):
+            send_whatsapp_message("🏏 Fetching live cricket scores...", target_chat)
+            matches = get_live_cricket_scores()
+            if matches:
+                response_text = "🏏 *LIVE CRICKET SCORES*\n\n"
+                for match in matches:
+                    response_text += f"*{match['teams']}*\n"
+                    response_text += f"📊 {match['score']}\n"
+                    if 'won' in match['status'].lower():
+                        response_text += f"🏆 {match['status']}\n"
+                    elif 'live' in match['status'].lower():
+                        response_text += f"🔴 {match['status']}\n"
+                    else:
+                        response_text += f"🟢 {match['status']}\n"
+                    response_text += "-------------------------\n"
+                response_text += "\n_Data from Cricbuzz_"
+                send_whatsapp_message(response_text, target_chat)
+            else:
+                send_whatsapp_message("❌ No live matches found or unable to fetch scores", target_chat)
         
         elif message.lower().startswith('/weather '):
             city = message[9:].strip()
