@@ -31,6 +31,10 @@ YT_COOKIES_DRIVE_URL = "https://drive.google.com/uc?export=download&id=13iX8xpx4
 # Thread pool for concurrent processing
 executor = ThreadPoolExecutor(max_workers=5)
 
+# Thread-safe session management
+user_sessions = {}
+session_lock = threading.Lock()
+
 # ======================
 # LOGGING SETUP
 # ======================
@@ -110,7 +114,87 @@ def check_audio(filename):
         logger.error(f"Audio check error: {str(e)}")
         return False
 
-def download_media(url, quality):
+def get_available_qualities(url):
+    """Get available qualities for YouTube URL"""
+    try:
+        ensure_cookies()
+        
+        ydl_opts = {
+            'quiet': True,
+            'no_warnings': True,
+            'extract_flat': False,
+            'cookiefile': YT_COOKIES_FILE if os.path.exists(YT_COOKIES_FILE) else None,
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': '*/*',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Referer': 'https://www.youtube.com/'
+            }
+        }
+        
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            if not info or 'formats' not in info:
+                return None
+            
+            quality_map = {}
+            for fmt in info.get('formats', []):
+                if fmt.get('vcodec') != 'none':
+                    height = fmt.get('height', 0)
+                    if height >= 1080: quality_map['1080p'] = fmt['format_id']
+                    if height >= 720: quality_map['720p'] = fmt['format_id']
+                    if height >= 480: quality_map['480p'] = fmt['format_id']
+                    if height >= 360: quality_map['360p'] = fmt['format_id']
+                    if height >= 144: quality_map['144p'] = fmt['format_id']
+            
+            quality_map['best'] = 'bestvideo+bestaudio/best'
+            quality_map['mp3'] = 'bestaudio/best'
+            return {q: quality_map[q] for q in ['144p', '360p', '480p', '720p', '1080p', 'best', 'mp3'] if q in quality_map}
+    except Exception as e:
+        logger.error(f"YouTube quality error: {str(e)}")
+        return None
+
+def send_quality_options(session_key, url, chat_id=None):
+    """Send available quality options"""
+    send_whatsapp_message("🔍 *Checking available video qualities...*", chat_id)
+    
+    try:
+        quality_map = get_available_qualities(url)
+        if not quality_map:
+            raise Exception("No qualities available")
+        
+        with session_lock:
+            user_sessions[session_key] = {
+                'url': url,
+                'quality_map': quality_map,
+                'awaiting_quality': True,
+                'option_map': {},
+                'chat_id': chat_id
+            }
+            
+            options_text = "📺 *Available download options (Max 100MB):*\n\n"
+            option_number = 1
+            
+            for qual in quality_map:
+                if qual == 'mp3':
+                    options_text += f"{option_number}. *MP3* _(Audio only)_ 🎵\n"
+                    user_sessions[session_key]['option_map'][str(option_number)] = ('mp3', None)
+                elif qual == 'best':
+                    options_text += f"{option_number}. *Best available quality* 🌟\n"
+                    user_sessions[session_key]['option_map'][str(option_number)] = ('best', quality_map[qual])
+                else:
+                    options_text += f"{option_number}. *{qual}* 📹\n"
+                    user_sessions[session_key]['option_map'][str(option_number)] = (qual, quality_map[qual])
+                option_number += 1
+            
+            options_text += "\n_Reply with the number of your choice_"
+            send_whatsapp_message(options_text, chat_id)
+    except Exception as e:
+        error_msg = "⚠️ *Error checking video qualities. Please try again later.*"
+        send_whatsapp_message(error_msg, chat_id)
+        logger.error(f"Quality options error: {str(e)}")
+
+def download_media(url, quality, format_id=None):
     """Download media with selected quality - FIXED VERSION"""
     try:
         ensure_cookies()
@@ -148,11 +232,10 @@ def download_media(url, quality):
                 'preferredquality': '192',
             }]
         else:
-            # Use adaptive format selection for better compatibility
-            ydl_opts['format'] = 'bestvideo[height<=720]+bestaudio/best[height<=720]'
+            ydl_opts['format'] = format_id or 'bestvideo+bestaudio/best'
             ydl_opts['merge_output_format'] = 'mp4'
         
-        logger.info(f"Starting download with options: {ydl_opts}")
+        logger.info(f"Starting download with quality: {quality}")
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             # First get info without downloading
@@ -165,7 +248,7 @@ def download_media(url, quality):
             
             # Find the downloaded file
             for file in os.listdir(temp_dir):
-                if file.endswith(('.mp4', '.mp3', '.webm')):
+                if file.endswith(('.mp4', '.mp3', '.webm', '.m4a')):
                     file_path = os.path.join(temp_dir, file)
                     
                     # Check file size (max 100MB)
@@ -173,17 +256,23 @@ def download_media(url, quality):
                         os.remove(file_path)
                         return None, "📛 *File size exceeds 100MB limit*"
                     
+                    # For MP3 files, rename if needed
+                    if quality == 'mp3' and not file.endswith('.mp3'):
+                        mp3_file = file_path.rsplit('.', 1)[0] + '.mp3'
+                        if os.path.exists(mp3_file):
+                            return mp3_file, title
+                    
                     # For video files, check if they have audio
                     if file.endswith('.mp4') and not check_audio(file_path):
                         logger.warning("Video has no audio, trying different format")
                         os.remove(file_path)
-                        # Try with different format
+                        # Try with different format that includes audio
                         ydl_opts['format'] = 'best[acodec!=none][vcodec!=none]'
                         with yt_dlp.YoutubeDL(ydl_opts) as ydl_retry:
                             ydl_retry.download([url])
                             # Find the new file
                             for retry_file in os.listdir(temp_dir):
-                                if retry_file.endswith(('.mp4', '.mp3', '.webm')):
+                                if retry_file.endswith(('.mp4', '.mp3')):
                                     return os.path.join(temp_dir, retry_file), title
                         return None, "❌ *No suitable format with audio found*"
                     
@@ -194,9 +283,9 @@ def download_media(url, quality):
     except yt_dlp.utils.DownloadError as e:
         logger.error(f"yt-dlp Download error: {str(e)}")
         
-        # Try fallback method without cookies
+        # Try fallback method with simpler format
         try:
-            logger.info("Trying fallback download without cookies")
+            logger.info("Trying fallback download with simpler format")
             fallback_opts = {
                 'outtmpl': os.path.join(temp_dir, '%(title).100s.%(ext)s'),
                 'format': 'best[height<=480]',
@@ -204,7 +293,8 @@ def download_media(url, quality):
                 'http_headers': {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                     'Accept': '*/*'
-                }
+                },
+                'cookiefile': YT_COOKIES_FILE if os.path.exists(YT_COOKIES_FILE) else None
             }
             
             with yt_dlp.YoutubeDL(fallback_opts) as ydl:
@@ -212,7 +302,9 @@ def download_media(url, quality):
                 
                 for file in os.listdir(temp_dir):
                     if file.endswith(('.mp4', '.mp3')):
-                        return os.path.join(temp_dir, file), "Downloaded Video"
+                        file_path = os.path.join(temp_dir, file)
+                        if os.path.getsize(file_path) <= 100 * 1024 * 1024:
+                            return file_path, "Downloaded Video"
             
             return None, "❌ *Download failed even with fallback method*"
             
@@ -224,47 +316,69 @@ def download_media(url, quality):
         logger.error(f"Unexpected download error: {str(e)}")
         return None, f"❌ *Download error: {str(e)}*"
 
-def process_youtube_download(url, chat_id):
-    """Process YouTube download request"""
-    try:
-        send_whatsapp_message("⬇️ *Starting YouTube download...*", chat_id)
-        
-        # Try MP3 first (usually more reliable)
-        file_path, result = download_media(url, 'mp3')
-        
-        if file_path:
-            if file_path.endswith('.mp3'):
-                send_whatsapp_file(file_path, "🎵 *YouTube Audio*", is_video=False, chat_id=chat_id)
-            else:
-                send_whatsapp_file(file_path, "🎥 *YouTube Video*", is_video=True, chat_id=chat_id)
-            
-            # Cleanup
-            os.remove(file_path)
-            os.rmdir(os.path.dirname(file_path))
-        else:
-            send_whatsapp_message(result, chat_id)
-            
-    except Exception as e:
-        logger.error(f"YouTube download processing error: {str(e)}")
-        send_whatsapp_message("❌ *Failed to process YouTube download*", chat_id)
-
-def process_user_message(message, chat_id, sender):
+def process_user_message(session_key, message, chat_id, sender):
     """Process user message"""
     try:
+        with session_lock:
+            session_data = user_sessions.get(session_key, {})
+        
+        # Handle quality selection
+        if session_data.get('awaiting_quality'):
+            choice = message.strip()
+            option_map = session_data.get('option_map', {})
+            
+            if choice in option_map:
+                quality, format_id = option_map[choice]
+                url = session_data['url']
+                
+                with session_lock:
+                    if session_key in user_sessions:
+                        del user_sessions[session_key]
+                
+                if quality == 'mp3':
+                    send_whatsapp_message("⬇️ *Downloading MP3 audio...* 🎵", chat_id)
+                    file_path, title_or_error = download_media(url, 'mp3')
+                    if file_path:
+                        send_whatsapp_file(file_path, f"🎵 *{title_or_error}*", is_video=False, chat_id=chat_id)
+                        os.remove(file_path)
+                        os.rmdir(os.path.dirname(file_path))
+                    else:
+                        error_msg = title_or_error if isinstance(title_or_error, str) else "❌ *Failed to download audio. Please try again.*"
+                        send_whatsapp_message(error_msg, chat_id)
+                else:
+                    send_whatsapp_message(f"⬇️ *Downloading {quality} quality...* 🎬", chat_id)
+                    file_path, title_or_error = download_media(url, quality, format_id)
+                    if file_path:
+                        send_whatsapp_file(file_path, f"🎥 *{title_or_error}*\n*Quality:* {quality}", is_video=True, chat_id=chat_id)
+                        os.remove(file_path)
+                        os.rmdir(os.path.dirname(file_path))
+                    else:
+                        error_msg = title_or_error if isinstance(title_or_error, str) else "❌ *Failed to download media. Please try again.*"
+                        send_whatsapp_message(error_msg, chat_id)
+            else:
+                send_whatsapp_message("❌ *Invalid choice. Please select one of the available options.*", chat_id)
+                with session_lock:
+                    if session_key in user_sessions:
+                        url = user_sessions[session_key]['url']
+                send_quality_options(session_key, url, chat_id)
+            return
+
         # Check if it's a YouTube URL
         if any(domain in message.lower() for domain in ['youtube.com', 'youtu.be']):
-            executor.submit(process_youtube_download, message, chat_id)
+            send_quality_options(session_key, message, chat_id)
         
         elif message.lower() in ['hi', 'hello', 'hey', '/help', 'help']:
             help_text = """👋 *YouTube Downloader Bot*
 
 📥 *Media Download:*
-Simply paste any YouTube URL to download as MP3 audio
+Simply paste any YouTube URL to download
+Choose from multiple quality options
 
 ⚡ *Features:*
-- Automatic MP3 conversion
+- Multiple video qualities (144p to 1080p)
+- MP3 audio downloads
 - 100MB file size limit
-- Fast downloads
+- Quality selection menu
 
 *Just send me a YouTube link!*"""
             send_whatsapp_message(help_text, chat_id)
@@ -304,9 +418,12 @@ def handle_webhook():
 
         logger.info(f"PROCESSING MESSAGE FROM {sender} IN CHAT {chat_id}: {message}")
 
+        # Create unique session key
+        session_key = f"{chat_id}_{sender}"
+
         # Allow processing if in authorized group or from admin
         if chat_id == AUTHORIZED_GROUP or (sender == ADMIN_NUMBER and not chat_id.endswith('@g.us')):
-            process_user_message(message, chat_id, sender)
+            process_user_message(session_key, message, chat_id, sender)
             return jsonify({'status': 'processing'}), 200
         else:
             logger.warning(f"Ignoring message from unauthorized chat: {chat_id}")
@@ -320,8 +437,8 @@ def handle_webhook():
 def health_check():
     return jsonify({
         "status": "active",
-        "service": "YouTube Downloader",
-        "timestamp": "2025-11-16T03:00:00Z"
+        "service": "YouTube Downloader with Quality Options",
+        "timestamp": "2025-11-16T03:20:00Z"
     })
 
 if __name__ == '__main__':
@@ -330,8 +447,9 @@ if __name__ == '__main__':
     logger.info(f"""
     ============================================
     YouTube Downloader Bot READY
-    Features: YouTube to MP3 downloads
+    Features: Multiple quality options + MP3
     Max file size: 100MB
+    Cookies: Enabled
     ============================================
     """)
     serve(app, host='0.0.0.0', port=8000)
