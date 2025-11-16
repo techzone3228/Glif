@@ -7,6 +7,7 @@ import os
 import tempfile
 import subprocess
 import threading
+import random
 from concurrent.futures import ThreadPoolExecutor
 
 app = Flask(__name__)
@@ -195,35 +196,52 @@ def send_quality_options(session_key, url, chat_id=None):
         logger.error(f"Quality options error: {str(e)}")
 
 def download_media(url, quality, format_id=None):
-    """Download media with selected quality - IMPROVED VERSION"""
+    """Download media with selected quality - COMPREHENSIVE FIX"""
     try:
         ensure_cookies()
         
         temp_dir = tempfile.mkdtemp()
         
-        # Base yt-dlp options
+        # Multiple User-Agent strings to rotate
+        user_agents = [
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        ]
+        
+        # STRATEGY 1: Try with comprehensive headers and cookies first
         ydl_opts = {
             'outtmpl': os.path.join(temp_dir, '%(title).100s.%(ext)s'),
             'quiet': False,
             'no_warnings': False,
-            'retries': 3,
-            'fragment_retries': 3,
+            'retries': 10,
+            'fragment_retries': 10,
             'skip_unavailable_fragments': True,
             'extract_flat': False,
             'http_headers': {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'User-Agent': random.choice(user_agents),
                 'Accept': '*/*',
                 'Accept-Language': 'en-US,en;q=0.9',
-                'Referer': 'https://www.youtube.com/'
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Referer': 'https://www.youtube.com/',
+                'Origin': 'https://www.youtube.com',
+                'Sec-Fetch-Dest': 'empty',
+                'Sec-Fetch-Mode': 'cors',
+                'Sec-Fetch-Site': 'same-site',
+                'DNT': '1',
+                'Connection': 'keep-alive',
+            },
+            'cookiefile': YT_COOKIES_FILE if os.path.exists(YT_COOKIES_FILE) else None,
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['android', 'web'],
+                    'player_skip': ['configs', 'webpage']
+                }
             }
         }
         
-        # Add cookies if available
-        if os.path.exists(YT_COOKIES_FILE):
-            ydl_opts['cookiefile'] = YT_COOKIES_FILE
-            logger.info("Using cookies for YouTube download")
-        
-        # IMPROVED: Better format selection based on quality
+        # Format selection
         if quality == 'mp3':
             ydl_opts['format'] = 'bestaudio/best'
             ydl_opts['postprocessors'] = [{
@@ -232,131 +250,146 @@ def download_media(url, quality, format_id=None):
                 'preferredquality': '192',
             }]
         else:
-            # Use specific format selection for each quality
-            format_selector = {
-                '144p': 'bestvideo[height<=144][vcodec^=avc1]+bestaudio/best[height<=144]',
-                '360p': 'bestvideo[height<=360][vcodec^=avc1]+bestaudio/best[height<=360]',
-                '480p': 'bestvideo[height<=480][vcodec^=avc1]+bestaudio/best[height<=480]',
-                '720p': 'bestvideo[height<=720][vcodec^=avc1]+bestaudio/best[height<=720]',
-                '1080p': 'bestvideo[height<=1080][vcodec^=avc1]+bestaudio/best[height<=1080]',
-                'best': 'bestvideo[ext=mp4][vcodec^=avc1]+bestaudio/best'
-            }.get(quality, 'bestvideo+bestaudio/best')
-            
-            ydl_opts['format'] = format_selector
+            # Try different format combinations
+            format_options = [
+                f'bestvideo[height<={quality.replace("p", "")}]+bestaudio/best',
+                f'best[height<={quality.replace("p", "")}]',
+                'best[ext=mp4]',
+                'best'
+            ]
+            ydl_opts['format'] = format_options[0]
             ydl_opts['merge_output_format'] = 'mp4'
         
-        logger.info(f"Starting download with quality: {quality}, format: {ydl_opts['format']}")
+        logger.info(f"STRATEGY 1: Starting download with quality: {quality}")
         
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            # Get info first to verify format availability
-            info = ydl.extract_info(url, download=False)
-            title = info.get('title', 'Unknown Title')
-            logger.info(f"Video title: {title}")
-            
-            # Now download with the selected format
-            ydl.download([url])
-            
-            # Find the downloaded file
-            downloaded_files = []
-            for file in os.listdir(temp_dir):
-                if file.endswith(('.mp4', '.mp3', '.webm', '.m4a')):
-                    file_path = os.path.join(temp_dir, file)
-                    downloaded_files.append(file_path)
-            
-            if not downloaded_files:
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                title = info.get('title', 'Unknown Title')
+                logger.info(f"Video title: {title}")
+                
+                ydl.download([url])
+                
+                # Check for downloaded files
+                for file in os.listdir(temp_dir):
+                    if file.endswith(('.mp4', '.mp3', '.webm', '.m4a')):
+                        file_path = os.path.join(temp_dir, file)
+                        if os.path.getsize(file_path) <= 100 * 1024 * 1024:
+                            return file_path, title
+                
                 return None, "❌ *No file found after download*"
-            
-            # Use the first found file
-            file_path = downloaded_files[0]
-            
-            # Check file size (max 100MB)
-            if os.path.getsize(file_path) > 100 * 1024 * 1024:
-                os.remove(file_path)
-                return None, "📛 *File size exceeds 100MB limit*"
-            
-            # For MP3 files, ensure proper extension
-            if quality == 'mp3':
-                if not file_path.endswith('.mp3'):
-                    mp3_file = file_path.rsplit('.', 1)[0] + '.mp3'
-                    if os.path.exists(mp3_file):
-                        return mp3_file, title
-                    else:
-                        # Convert to MP3 if needed
-                        converted_file = file_path.rsplit('.', 1)[0] + '.mp3'
-                        subprocess.run([
-                            'ffmpeg', '-i', file_path, '-codec:a', 'libmp3lame', 
-                            '-q:a', '2', converted_file, '-y'
-                        ], capture_output=True)
-                        if os.path.exists(converted_file):
-                            os.remove(file_path)
-                            return converted_file, title
-            
-            # For video files, check if they have audio
-            if file_path.endswith('.mp4') and not check_audio(file_path):
-                logger.warning("Video has no audio, trying format with audio")
-                os.remove(file_path)
-                # Try with format that guarantees audio
-                ydl_opts['format'] = 'best[acodec!=none][vcodec!=none]/best'
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl_retry:
-                    ydl_retry.download([url])
-                    # Find the new file
-                    for retry_file in os.listdir(temp_dir):
-                        if retry_file.endswith('.mp4'):
-                            retry_path = os.path.join(temp_dir, retry_file)
-                            if os.path.getsize(retry_path) <= 100 * 1024 * 1024:
-                                return retry_path, title
-                return None, "❌ *No suitable format with audio found*"
-            
-            return file_path, title
+                
+        except Exception as e:
+            logger.warning(f"Strategy 1 failed: {str(e)}")
         
-    except yt_dlp.utils.DownloadError as e:
-        logger.error(f"yt-dlp Download error: {str(e)}")
-        
-        # IMPROVED: Try alternative format selectors instead of just fallback
-        alternative_formats = [
-            f'bestvideo[height<={quality.replace("p", "")}]+bestaudio/best',
-            f'best[height<={quality.replace("p", "")}]',
-            'best[ext=mp4]',
-            'best'
-        ]
-        
-        for alt_format in alternative_formats:
-            try:
-                logger.info(f"Trying alternative format: {alt_format}")
-                fallback_opts = {
-                    'outtmpl': os.path.join(temp_dir, '%(title).100s.%(ext)s'),
-                    'format': alt_format,
-                    'merge_output_format': 'mp4' if quality != 'mp3' else None,
-                    'http_headers': {
-                        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                        'Accept': '*/*'
-                    },
-                    'cookiefile': YT_COOKIES_FILE if os.path.exists(YT_COOKIES_FILE) else None
+        # STRATEGY 2: Try with different extractor arguments
+        logger.info("STRATEGY 2: Trying different extractor arguments")
+        ydl_opts_2 = {
+            'outtmpl': os.path.join(temp_dir, '%(title).100s.%(ext)s'),
+            'format': 'best[height<=720]/best[height<=480]/best',
+            'merge_output_format': 'mp4',
+            'http_headers': {
+                'User-Agent': random.choice(user_agents),
+                'Accept': '*/*',
+                'Referer': 'https://www.youtube.com/',
+            },
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['ios', 'android_embed'],
+                    'skip': ['dash', 'hls']
                 }
-                
-                if quality == 'mp3':
-                    fallback_opts['format'] = 'bestaudio/best'
-                    fallback_opts['postprocessors'] = [{
-                        'key': 'FFmpegExtractAudio',
-                        'preferredcodec': 'mp3',
-                        'preferredquality': '192',
-                    }]
-                
-                with yt_dlp.YoutubeDL(fallback_opts) as ydl:
-                    ydl.download([url])
-                    
-                    for file in os.listdir(temp_dir):
-                        if file.endswith(('.mp4', '.mp3')):
-                            file_path = os.path.join(temp_dir, file)
-                            if os.path.getsize(file_path) <= 100 * 1024 * 1024:
-                                return file_path, f"Downloaded ({quality} attempt)"
-                
-            except Exception as alt_error:
-                logger.warning(f"Alternative format {alt_format} failed: {str(alt_error)}")
-                continue
+            },
+            'cookiefile': YT_COOKIES_FILE if os.path.exists(YT_COOKIES_FILE) else None,
+        }
         
-        return None, "❌ *YouTube is blocking downloads. Try again later.*"
-            
+        if quality == 'mp3':
+            ydl_opts_2['format'] = 'bestaudio/best'
+            ydl_opts_2['postprocessors'] = [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }]
+        
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts_2) as ydl:
+                ydl.download([url])
+                
+                for file in os.listdir(temp_dir):
+                    if file.endswith(('.mp4', '.mp3')):
+                        file_path = os.path.join(temp_dir, file)
+                        if os.path.getsize(file_path) <= 100 * 1024 * 1024:
+                            return file_path, "Downloaded Video"
+        except Exception as e:
+            logger.warning(f"Strategy 2 failed: {str(e)}")
+        
+        # STRATEGY 3: Try without cookies (sometimes cookies cause issues)
+        logger.info("STRATEGY 3: Trying without cookies")
+        ydl_opts_3 = {
+            'outtmpl': os.path.join(temp_dir, '%(title).100s.%(ext)s'),
+            'format': 'best[height<=480]/best',
+            'merge_output_format': 'mp4',
+            'http_headers': {
+                'User-Agent': random.choice(user_agents),
+                'Accept': '*/*',
+                'Referer': 'https://www.youtube.com/',
+            },
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['tv_html5', 'web']
+                }
+            }
+        }
+        
+        if quality == 'mp3':
+            ydl_opts_3['format'] = 'bestaudio/best'
+            ydl_opts_3['postprocessors'] = [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }]
+        
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts_3) as ydl:
+                ydl.download([url])
+                
+                for file in os.listdir(temp_dir):
+                    if file.endswith(('.mp4', '.mp3')):
+                        file_path = os.path.join(temp_dir, file)
+                        if os.path.getsize(file_path) <= 100 * 1024 * 1024:
+                            return file_path, "Downloaded Video"
+        except Exception as e:
+            logger.warning(f"Strategy 3 failed: {str(e)}")
+        
+        # STRATEGY 4: Last resort - try with minimal options
+        logger.info("STRATEGY 4: Trying minimal options")
+        ydl_opts_4 = {
+            'outtmpl': os.path.join(temp_dir, '%(title).100s.%(ext)s'),
+            'format': 'best',
+            'merge_output_format': 'mp4',
+        }
+        
+        if quality == 'mp3':
+            ydl_opts_4['format'] = 'bestaudio/best'
+            ydl_opts_4['postprocessors'] = [{
+                'key': 'FFmpegExtractAudio',
+                'preferredcodec': 'mp3',
+                'preferredquality': '192',
+            }]
+        
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts_4) as ydl:
+                ydl.download([url])
+                
+                for file in os.listdir(temp_dir):
+                    if file.endswith(('.mp4', '.mp3')):
+                        file_path = os.path.join(temp_dir, file)
+                        if os.path.getsize(file_path) <= 100 * 1024 * 1024:
+                            return file_path, "Downloaded Video (Fallback)"
+        except Exception as e:
+            logger.warning(f"Strategy 4 failed: {str(e)}")
+        
+        return None, "❌ *All download strategies failed. YouTube is blocking downloads.*"
+        
     except Exception as e:
         logger.error(f"Unexpected download error: {str(e)}")
         return None, f"❌ *Download error: {str(e)}*"
@@ -482,8 +515,8 @@ def handle_webhook():
 def health_check():
     return jsonify({
         "status": "active",
-        "service": "YouTube Downloader with Quality Options",
-        "timestamp": "2025-11-16T03:40:00Z"
+        "service": "YouTube Downloader with Multiple Strategies",
+        "timestamp": "2025-11-16T03:45:00Z"
     })
 
 if __name__ == '__main__':
@@ -492,10 +525,10 @@ if __name__ == '__main__':
     logger.info(f"""
     ============================================
     YouTube Downloader Bot READY
-    Features: Multiple quality options + MP3
+    Features: Multiple bypass strategies
     Max file size: 100MB
     Cookies: Enabled
-    Improved format selection
+    Multiple fallback strategies
     ============================================
     """)
     serve(app, host='0.0.0.0', port=8000)
