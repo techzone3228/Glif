@@ -15,7 +15,7 @@ import time
 app = Flask(__name__)
 
 # ======================
-# CONFIGURATION
+# CONFIGURATION - EXACTLY LIKE ORIGINAL WORKING SCRIPT
 # ======================
 GREEN_API = {
     "idInstance": "7105261536",
@@ -95,16 +95,34 @@ def send_whatsapp_file(file_path, caption, is_video=False, chat_id=None):
             return False
             
         target_chat = chat_id if chat_id else AUTHORIZED_GROUP
+        
+        # Determine content type
+        if is_video:
+            content_type = 'video/mp4'
+        elif file_path.endswith('.mp3'):
+            content_type = 'audio/mpeg'
+        else:
+            content_type = 'video/mp4'  # Default for videos
+            
         with open(file_path, 'rb') as file:
+            files = {'file': (os.path.basename(file_path), file, content_type)}
+            data = {'chatId': target_chat, 'caption': caption}
+            
             response = requests.post(
                 f"{GREEN_API['mediaUrl']}/waInstance{GREEN_API['idInstance']}/sendFileByUpload/{GREEN_API['apiToken']}",
-                files={'file': (os.path.basename(file_path), file, 
-                      'video/mp4' if is_video else 'audio/mpeg')},
-                data={'chatId': target_chat, 'caption': caption}
+                files=files,
+                data=data,
+                timeout=60  # Increased timeout for file upload
             )
             response.raise_for_status()
             logger.info(f"File sent to {target_chat}: {caption[:50]}...")
             return True
+    except requests.exceptions.ConnectionError as e:
+        logger.error(f"Network connection error: {str(e)}")
+        return False
+    except requests.exceptions.Timeout as e:
+        logger.error(f"Request timeout: {str(e)}")
+        return False
     except Exception as e:
         logger.error(f"File send error: {str(e)}")
         return False
@@ -373,7 +391,7 @@ def process_user_message(session_key, message, chat_id, sender):
                             if send_whatsapp_file(file_path, caption, is_video=is_video, chat_id=chat_id):
                                 logger.info(f"File sent successfully: {title_or_error}")
                             else:
-                                send_whatsapp_message("❌ *Failed to send file*", chat_id)
+                                send_whatsapp_message("❌ *Failed to send file - Network issue*", chat_id)
                         else:
                             error_msg = title_or_error if isinstance(title_or_error, str) else "❌ *Failed to download media*"
                             send_whatsapp_message(error_msg, chat_id)
@@ -485,6 +503,7 @@ if __name__ == '__main__':
     Features: Exact quality selection - FIXED FILE HANDLING
     Max file size: 100MB
     yt-dlp: 2025.10.14
+    GreenAPI Instance: {GREEN_API['idInstance']}
     ============================================
     """)
     serve(app, host='0.0.0.0', port=8000)
