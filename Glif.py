@@ -258,6 +258,8 @@ def download_media_with_quality(url, quality, format_id=None):
                         ], capture_output=True, timeout=30)
                         if os.path.exists(mp3_file):
                             downloaded_file_path = mp3_file
+                    except Exception as e:
+                        logger.error(f"MP3 conversion error: {str(e)}")
             
             return downloaded_file_path, title, temp_dir
             
