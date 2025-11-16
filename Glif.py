@@ -116,7 +116,7 @@ def check_audio(filename):
         return False
 
 def get_available_qualities(url):
-    """Get available qualities for URL - PROPER QUALITY MAPPING"""
+    """Get available qualities for URL - EXACT QUALITY MAPPING"""
     try:
         ensure_cookies()
         
@@ -139,33 +139,38 @@ def get_available_qualities(url):
             if not info or 'formats' not in info:
                 return None
             
-            # PROPER QUALITY MAPPING - Store actual format combinations
+            # EXACT QUALITY MAPPING - Find best format for each quality
             quality_map = {}
             formats = info.get('formats', [])
             
-            # Find best formats for each quality
-            for fmt in formats:
-                height = fmt.get('height', 0)
-                format_id = fmt.get('format_id', '')
-                
-                # Only consider formats with video
-                if fmt.get('vcodec') != 'none':
-                    if 140 <= height <= 144 and '144p' not in quality_map:
-                        quality_map['144p'] = format_id
-                    elif 230 <= height <= 360 and '360p' not in quality_map:
-                        quality_map['360p'] = format_id
-                    elif 370 <= height <= 480 and '480p' not in quality_map:
-                        quality_map['480p'] = format_id
-                    elif 550 <= height <= 720 and '720p' not in quality_map:
-                        quality_map['720p'] = format_id
-                    elif 870 <= height <= 1080 and '1080p' not in quality_map:
-                        quality_map['1080p'] = format_id
+            # Sort formats by quality (height) and bitrate
+            video_formats = [f for f in formats if f.get('vcodec') != 'none' and f.get('acodec') != 'none']
+            video_formats.sort(key=lambda x: (x.get('height', 0), x.get('tbr', 0)), reverse=True)
             
-            # Add best quality option
-            quality_map['best'] = 'bestvideo+bestaudio/best'
+            # Map qualities to specific format IDs
+            quality_targets = {
+                '144p': (140, 144),
+                '360p': (230, 360),
+                '480p': (370, 480),
+                '720p': (550, 720),
+                '1080p': (870, 1080)
+            }
+            
+            for quality, (min_h, max_h) in quality_targets.items():
+                for fmt in video_formats:
+                    height = fmt.get('height', 0)
+                    format_id = fmt.get('format_id', '')
+                    # Find the best format in this quality range
+                    if min_h <= height <= max_h:
+                        if quality not in quality_map:
+                            quality_map[quality] = format_id
+                            break
+            
+            # Add best quality options
+            quality_map['best'] = 'best'
             quality_map['mp3'] = 'bestaudio/best'
             
-            logger.info(f"Available qualities: {quality_map}")
+            logger.info(f"Available qualities mapped: {quality_map}")
             return quality_map
             
     except Exception as e:
@@ -173,7 +178,7 @@ def get_available_qualities(url):
         return None
 
 def download_media_with_quality(url, quality, format_id=None):
-    """Download media with EXACT quality selection"""
+    """Download media with EXACT quality selection - FIXED VERSION"""
     try:
         ensure_cookies()
         
@@ -184,6 +189,7 @@ def download_media_with_quality(url, quality, format_id=None):
             'outtmpl': os.path.join(temp_dir, '%(title).100s.%(ext)s'),
             'merge_output_format': 'mp4',
             'quiet': True,
+            'no_warnings': True,
             'retries': 3,
             "extractor_args": {
                 "youtube": {
@@ -197,7 +203,7 @@ def download_media_with_quality(url, quality, format_id=None):
         if os.path.exists(YT_COOKIES_FILE):
             ydl_opts['cookiefile'] = YT_COOKIES_FILE
         
-        # EXACT QUALITY SELECTION LOGIC
+        # EXACT QUALITY SELECTION - FIXED LOGIC
         if quality == 'mp3':
             ydl_opts['format'] = 'bestaudio/best'
             ydl_opts['postprocessors'] = [{
@@ -206,16 +212,17 @@ def download_media_with_quality(url, quality, format_id=None):
                 'preferredquality': '192',
             }]
         elif quality == 'best':
-            ydl_opts['format'] = 'bestvideo+bestaudio/best'
+            # Use best available quality
+            ydl_opts['format'] = 'best[height<=1080]'
         else:
             # USE SPECIFIC FORMAT ID FOR EXACT QUALITY
-            if format_id and format_id != 'bestvideo+bestaudio/best':
+            if format_id and format_id != 'best':
                 ydl_opts['format'] = format_id
             else:
                 # Fallback to height-based selection
                 height_map = {
                     '144p': 'best[height<=144]',
-                    '360p': 'best[height<=360]',
+                    '360p': 'best[height<=360]', 
                     '480p': 'best[height<=480]',
                     '720p': 'best[height<=720]',
                     '1080p': 'best[height<=1080]'
@@ -349,30 +356,39 @@ def process_user_message(session_key, message, chat_id, sender):
                     if session_key in user_sessions:
                         del user_sessions[session_key]
                 
-                if quality == 'mp3':
-                    send_whatsapp_message("⬇️ *Downloading MP3 audio...* 🎵", chat_id)
-                    file_path, title_or_error = download_media_with_quality(url, 'mp3', format_id)
-                else:
-                    send_whatsapp_message(f"⬇️ *Downloading {quality} quality...* 🎬", chat_id)
-                    file_path, title_or_error = download_media_with_quality(url, quality, format_id)
+                # Submit download task to thread pool
+                def download_task():
+                    try:
+                        if quality == 'mp3':
+                            send_whatsapp_message("⬇️ *Downloading MP3 audio...* 🎵", chat_id)
+                            file_path, title_or_error = download_media_with_quality(url, 'mp3', format_id)
+                        else:
+                            send_whatsapp_message(f"⬇️ *Downloading {quality} quality...* 🎬", chat_id)
+                            file_path, title_or_error = download_media_with_quality(url, quality, format_id)
+                        
+                        if file_path:
+                            is_video = not file_path.endswith('.mp3')
+                            quality_display = 'MP3' if not is_video else quality
+                            caption = f"🎵 *{title_or_error}*" if not is_video else f"🎥 *{title_or_error}*\n*Quality:* {quality}"
+                            
+                            if send_whatsapp_file(file_path, caption, is_video=is_video, chat_id=chat_id):
+                                # Cleanup
+                                try:
+                                    os.remove(file_path)
+                                    os.rmdir(os.path.dirname(file_path))
+                                except:
+                                    pass
+                            else:
+                                send_whatsapp_message("❌ *Failed to send file*", chat_id)
+                        else:
+                            error_msg = title_or_error if isinstance(title_or_error, str) else "❌ *Failed to download media*"
+                            send_whatsapp_message(error_msg, chat_id)
+                    except Exception as e:
+                        logger.error(f"Download task error: {str(e)}")
+                        send_whatsapp_message("❌ *Download error occurred*", chat_id)
                 
-                if file_path:
-                    is_video = not file_path.endswith('.mp3')
-                    quality_display = 'MP3' if not is_video else quality
-                    caption = f"🎵 *{title_or_error}*" if not is_video else f"🎥 *{title_or_error}*\n*Quality:* {quality}"
-                    
-                    if send_whatsapp_file(file_path, caption, is_video=is_video, chat_id=chat_id):
-                        # Cleanup
-                        try:
-                            os.remove(file_path)
-                            os.rmdir(os.path.dirname(file_path))
-                        except:
-                            pass
-                    else:
-                        send_whatsapp_message("❌ *Failed to send file*", chat_id)
-                else:
-                    error_msg = title_or_error if isinstance(title_or_error, str) else "❌ *Failed to download media*"
-                    send_whatsapp_message(error_msg, chat_id)
+                # Execute in thread pool
+                executor.submit(download_task)
             else:
                 send_whatsapp_message("❌ *Invalid choice. Please select a valid number.*", chat_id)
             return
@@ -391,7 +407,7 @@ Send any YouTube URL to download
 
 🎯 *Quality Options:*
 - 144p, 360p, 480p, 720p, 1080p
-- Best available quality
+- Best available quality  
 - MP3 audio
 
 ⚡ *Features:*
@@ -466,7 +482,7 @@ if __name__ == '__main__':
     logger.info(f"""
     ============================================
     YouTube Downloader Bot READY
-    Features: Exact quality selection
+    Features: Exact quality selection - FIXED
     Max file size: 100MB
     yt-dlp: 2025.10.14
     ============================================
