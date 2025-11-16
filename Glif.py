@@ -15,7 +15,6 @@ from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 from concurrent.futures import ThreadPoolExecutor
 from bs4 import BeautifulSoup
-import shutil
 
 app = Flask(__name__)
 
@@ -346,12 +345,15 @@ def get_other_platform_qualities(url):
         logger.error(f"Other platform error: {str(e)}")
         return None
 
-def download_media_with_quality(url, quality, format_id=None):
-    """Download media with EXACT quality selection - FIXED VERSION"""
-    temp_dir = tempfile.mkdtemp()
-    downloaded_file_path = None
-    
+def download_media(url, quality, format_id=None):
+    """Download media with selected quality - UPDATED VERSION"""
     try:
+        estimated_size = get_estimated_size(url, quality)
+        if estimated_size and estimated_size > 100 * 1024 * 1024:
+            return None, "📛 *File size exceeds 100MB limit*"
+        
+        temp_dir = tempfile.mkdtemp()
+        
         # yt-dlp options with modern settings
         ydl_opts = {
             'outtmpl': os.path.join(temp_dir, '%(title).100s.%(ext)s'),
@@ -371,7 +373,7 @@ def download_media_with_quality(url, quality, format_id=None):
         if cookies := get_cookies_for_url(url):
             ydl_opts['cookiefile'] = cookies
         
-        # EXACT QUALITY SELECTION - FIXED LOGIC
+        # EXACT QUALITY SELECTION - UPDATED LOGIC
         if quality == 'mp3':
             ydl_opts['format'] = 'bestaudio/best'
             ydl_opts['postprocessors'] = [{
@@ -380,7 +382,6 @@ def download_media_with_quality(url, quality, format_id=None):
                 'preferredquality': '192',
             }]
         elif quality == 'best':
-            # Use best available quality
             ydl_opts['format'] = 'best[height<=1080]'
         else:
             # USE SPECIFIC FORMAT ID FOR EXACT QUALITY
@@ -401,61 +402,67 @@ def download_media_with_quality(url, quality, format_id=None):
         
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=True)
+            downloaded_files = []
             
-            # Find the downloaded file
+            # Find all downloaded files
             for file in os.listdir(temp_dir):
                 if any(file.endswith(ext) for ext in ['.mp4', '.mp3', '.webm', '.m4a']):
-                    downloaded_file_path = os.path.join(temp_dir, file)
-                    break
+                    file_path = os.path.join(temp_dir, file)
+                    downloaded_files.append(file_path)
             
-            if not downloaded_file_path or not os.path.exists(downloaded_file_path):
-                return None, "No file downloaded", None
+            if not downloaded_files:
+                return None, "No file downloaded"
             
-            file_size = os.path.getsize(downloaded_file_path)
+            # Use the main file (usually the first one)
+            main_file = downloaded_files[0]
+            file_size = os.path.getsize(main_file)
             
             # Check file size limit
             if file_size > 100 * 1024 * 1024:
-                return None, "📛 *File size exceeds 100MB limit*", None
+                for f in downloaded_files:
+                    os.remove(f)
+                return None, "📛 *File size exceeds 100MB limit*"
             
             title = info.get('title', 'Unknown Title')
             
             # For MP3, ensure proper extension
-            if quality == 'mp3' and not downloaded_file_path.endswith('.mp3'):
-                mp3_file = downloaded_file_path.rsplit('.', 1)[0] + '.mp3'
+            if quality == 'mp3' and not main_file.endswith('.mp3'):
+                mp3_file = main_file.rsplit('.', 1)[0] + '.mp3'
                 if os.path.exists(mp3_file):
-                    downloaded_file_path = mp3_file
+                    return mp3_file, title
                 else:
                     # Convert to MP3 if needed
+                    converted_file = main_file.rsplit('.', 1)[0] + '.mp3'
                     try:
                         subprocess.run([
-                            'ffmpeg', '-i', downloaded_file_path, '-codec:a', 'libmp3lame', 
-                            '-q:a', '2', mp3_file, '-y'
+                            'ffmpeg', '-i', main_file, '-codec:a', 'libmp3lame', 
+                            '-q:a', '2', converted_file, '-y'
                         ], capture_output=True, timeout=30)
-                        if os.path.exists(mp3_file):
-                            downloaded_file_path = mp3_file
-                    except Exception as e:
-                        logger.error(f"MP3 conversion error: {str(e)}")
+                        if os.path.exists(converted_file):
+                            os.remove(main_file)
+                            return converted_file, title
+                    except:
+                        pass
             
-            return downloaded_file_path, title, temp_dir
+            return main_file, title
             
     except Exception as e:
         logger.error(f"Download error: {str(e)}")
-        # Cleanup on error
-        if temp_dir and os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir)
-        return None, f"Download failed: {str(e)}", None
-
-def cleanup_temp_files(file_path, temp_dir):
-    """Clean up temporary files after sending"""
-    try:
-        if file_path and os.path.exists(file_path):
-            os.remove(file_path)
-            logger.info(f"Removed file: {file_path}")
-        if temp_dir and os.path.exists(temp_dir):
-            shutil.rmtree(temp_dir)
-            logger.info(f"Removed temp directory: {temp_dir}")
-    except Exception as e:
-        logger.error(f"Cleanup error: {str(e)}")
+        return None, f"Download failed: {str(e)}"
+    finally:
+        # Cleanup temp directory - ONLY if no file was returned
+        try:
+            if temp_dir and os.path.exists(temp_dir):
+                # Only cleanup if we didn't return a file
+                files_in_dir = os.listdir(temp_dir)
+                if not any(f.endswith(('.mp4', '.mp3', '.webm', '.m4a')) for f in files_in_dir):
+                    for file in files_in_dir:
+                        file_path = os.path.join(temp_dir, file)
+                        if os.path.isfile(file_path):
+                            os.remove(file_path)
+                    os.rmdir(temp_dir)
+        except:
+            pass
 
 def send_whatsapp_message(text, chat_id=None):
     """Send text message to authorized group or specified chat"""
@@ -476,42 +483,17 @@ def send_whatsapp_message(text, chat_id=None):
 def send_whatsapp_file(file_path, caption, is_video=False, chat_id=None):
     """Send file with caption to group or specified chat"""
     try:
-        # Check if file exists before sending
-        if not os.path.exists(file_path):
-            logger.error(f"File not found: {file_path}")
-            return False
-            
         target_chat = chat_id if chat_id else AUTHORIZED_GROUP
-        
-        # Determine content type
-        if is_video:
-            content_type = 'video/mp4'
-        elif file_path.endswith('.mp3'):
-            content_type = 'audio/mpeg'
-        elif file_path.endswith('.pdf'):
-            content_type = 'application/pdf'
-        else:
-            content_type = 'video/mp4'  # Default for videos
-            
         with open(file_path, 'rb') as file:
-            files = {'file': (os.path.basename(file_path), file, content_type)}
-            data = {'chatId': target_chat, 'caption': caption}
-            
             response = requests.post(
                 f"{GREEN_API['mediaUrl']}/waInstance{GREEN_API['idInstance']}/sendFileByUpload/{GREEN_API['apiToken']}",
-                files=files,
-                data=data,
-                timeout=60  # Increased timeout for file upload
+                files={'file': (os.path.basename(file_path), file, 
+                      'video/mp4' if is_video else 'audio/mpeg' if file_path.endswith('.mp3') else 'application/pdf' if file_path.endswith('.pdf') else 'image/jpeg')},
+                data={'chatId': target_chat, 'caption': caption}
             )
             response.raise_for_status()
             logger.info(f"File sent to {target_chat}: {caption[:50]}...")
             return True
-    except requests.exceptions.ConnectionError as e:
-        logger.error(f"Network connection error: {str(e)}")
-        return False
-    except requests.exceptions.Timeout as e:
-        logger.error(f"Request timeout: {str(e)}")
-        return False
     except Exception as e:
         logger.error(f"File send error: {str(e)}")
         return False
@@ -523,8 +505,7 @@ def send_quality_options(session_key, url, chat_id=None):
     try:
         quality_map = get_available_qualities(url)
         if not quality_map:
-            send_whatsapp_message("❌ *No qualities available for this video*", chat_id)
-            return
+            raise Exception("No qualities available")
         
         with session_lock:
             user_sessions[session_key] = {
@@ -538,25 +519,20 @@ def send_quality_options(session_key, url, chat_id=None):
             options_text = "📺 *Available download options (Max 100MB):*\n\n"
             option_number = 1
             
-            # Show available qualities in order
-            quality_order = ['144p', '360p', '480p', '720p', '1080p', 'best', 'mp3']
-            
-            for qual in quality_order:
-                if qual in quality_map:
-                    if qual == 'mp3':
-                        options_text += f"{option_number}. *MP3* _(Audio only)_ 🎵\n"
-                        user_sessions[session_key]['option_map'][str(option_number)] = ('mp3', quality_map[qual])
-                    elif qual == 'best':
-                        options_text += f"{option_number}. *Best available quality* 🌟\n"
-                        user_sessions[session_key]['option_map'][str(option_number)] = ('best', quality_map[qual])
-                    else:
-                        options_text += f"{option_number}. *{qual}* 📹\n"
-                        user_sessions[session_key]['option_map'][str(option_number)] = (qual, quality_map[qual])
-                    option_number += 1
+            for qual in quality_map:
+                if qual == 'mp3' or '(Audio)' in qual:
+                    options_text += f"{option_number}. *MP3* _(Audio only)_ 🎵\n"
+                    user_sessions[session_key]['option_map'][str(option_number)] = ('mp3', None)
+                elif qual == 'best':
+                    options_text += f"{option_number}. *Best available quality* 🌟\n"
+                    user_sessions[session_key]['option_map'][str(option_number)] = ('best', quality_map[qual])
+                else:
+                    options_text += f"{option_number}. *{qual}* 📹\n"
+                    user_sessions[session_key]['option_map'][str(option_number)] = (qual, quality_map[qual])
+                option_number += 1
             
             options_text += "\n_Reply with the number of your choice_"
             send_whatsapp_message(options_text, chat_id)
-            
     except Exception as e:
         error_msg = "⚠️ *Instagram servers are busy. Please try again later.*" if is_instagram_url(url) else "⚠️ *Error checking video qualities. Please try again later.*"
         send_whatsapp_message(error_msg, chat_id)
@@ -739,7 +715,7 @@ def search_wikipedia(query):
         return []
 
 def download_wikipedia_pdf(title, chat_id=None):
-    """Download Wikipedia page as PDF"""
+    """Download Wikipedia page as PDF - UPDATED VERSION"""
     formatted_title = title.strip().replace(" ", "_")
     url = WIKIPEDIA_BASE_URL + WIKIPEDIA_API_PDF + formatted_title
     temp_dir = tempfile.mkdtemp()
@@ -849,48 +825,26 @@ def process_user_message(session_key, message, chat_id, sender):
                     if session_key in user_sessions:
                         del user_sessions[session_key]
                 
-                # Submit download task to thread pool
-                def download_task():
-                    file_path = None
-                    temp_dir = None
-                    try:
-                        if quality == 'mp3':
-                            send_whatsapp_message("⬇️ *Downloading MP3 audio...* 🎵", target_chat)
-                        else:
-                            send_whatsapp_message(f"⬇️ *Downloading {quality} quality...* 🎬", target_chat)
-                        
-                        # Download the file
-                        file_path, title_or_error, temp_dir = download_media_with_quality(url, quality, format_id)
-                        
-                        if file_path and os.path.exists(file_path):
-                            logger.info(f"File downloaded successfully: {file_path}")
-                            logger.info(f"File exists: {os.path.exists(file_path)}")
-                            logger.info(f"File size: {os.path.getsize(file_path)} bytes")
-                            
-                            is_video = not file_path.endswith('.mp3')
-                            quality_display = 'MP3' if not is_video else quality
-                            caption = f"🎵 *{title_or_error}*" if not is_video else f"🎥 *{title_or_error}*\n*Quality:* {quality}"
-                            
-                            # Send the file
-                            if send_whatsapp_file(file_path, caption, is_video=is_video, chat_id=target_chat):
-                                logger.info(f"File sent successfully: {title_or_error}")
-                            else:
-                                send_whatsapp_message("❌ *Failed to send file - Network issue*", target_chat)
-                        else:
-                            error_msg = title_or_error if isinstance(title_or_error, str) else "❌ *Failed to download media*"
-                            send_whatsapp_message(error_msg, target_chat)
-                        
-                    except Exception as e:
-                        logger.error(f"Download task error: {str(e)}")
-                        send_whatsapp_message("❌ *Download error occurred*", target_chat)
-                    finally:
-                        # Cleanup temporary files after sending
-                        if file_path or temp_dir:
-                            logger.info(f"Cleaning up files: {file_path}, {temp_dir}")
-                            cleanup_temp_files(file_path, temp_dir)
-                
-                # Execute in thread pool
-                executor.submit(download_task)
+                if quality == 'mp3' or '(Audio)' in quality:
+                    send_whatsapp_message("⬇️ *Downloading MP3 audio...* 🎵", target_chat)
+                    file_path, title_or_error = download_media(url, 'mp3')
+                    if file_path:
+                        send_whatsapp_file(file_path, f"🎵 *{title_or_error}*", is_video=False, chat_id=target_chat)
+                        os.remove(file_path)
+                        os.rmdir(os.path.dirname(file_path))
+                    else:
+                        error_msg = title_or_error if isinstance(title_or_error, str) else "❌ *Failed to download audio. Please try again.*"
+                        send_whatsapp_message(error_msg, target_chat)
+                else:
+                    send_whatsapp_message(f"⬇️ *Downloading {quality} quality...* 🎬", target_chat)
+                    file_path, title_or_error = download_media(url, quality, format_id)
+                    if file_path:
+                        send_whatsapp_file(file_path, f"🎥 *{title_or_error}*\n*Quality:* {quality}", is_video=True, chat_id=target_chat)
+                        os.remove(file_path)
+                        os.rmdir(os.path.dirname(file_path))
+                    else:
+                        error_msg = title_or_error if isinstance(title_or_error, str) else "❌ *Failed to download media. Please try again.*"
+                        send_whatsapp_message(error_msg, target_chat)
             else:
                 send_whatsapp_message("❌ *Invalid choice. Please select one of the available options.*", target_chat)
                 with session_lock:
